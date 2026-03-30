@@ -1,0 +1,30 @@
+# ── 設定ファイル（トークン・チャンネル名を含む） ──
+config.json
+
+# ── PyInstaller ──
+build/
+dist/
+*.spec.bak
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ── アイコン生成物 ──
+icon.ico
+icon_preview.png
+
+# ── Python 仮想環境 ──
+.venv/
+venv/
+env/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── エディタ ──
+.vscode/
+.idea/
+*.swp
+*.swo

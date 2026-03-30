@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Twitch トークン取得ガイド — ChatViewPlayGame</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+
+  :root {
+    --bg:        #0A0C14;
+    --surface:   #12151F;
+    --surface2:  #1A1E2E;
+    --border:    #2A2F48;
+    --accent:    #64B4FF;
+    --green:     #50DCA0;
+    --warn:      #FFC832;
+    --red:       #FF4466;
+    --text:      #E6EBFF;
+    --muted:     #6878A8;
+    --twitch:    #9147FF;
+    --twitch-d:  #7B2FDB;
+    --radius:    12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Noto Sans JP', sans-serif;
+    font-size: 15px;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  /* ── ヘッダー ── */
+  .hero {
+    background: linear-gradient(135deg, #0D0F1A 0%, #1A0D3A 50%, #0D1A2A 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 48px 24px 40px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 60% 80% at 50% 0%, rgba(145,71,255,0.15) 0%, transparent 70%);
+  }
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(145,71,255,0.15);
+    border: 1px solid rgba(145,71,255,0.4);
+    border-radius: 99px;
+    padding: 6px 16px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    color: #B880FF;
+    letter-spacing: 0.08em;
+    margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-size: clamp(24px, 5vw, 40px);
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+  .hero h1 span { color: var(--twitch); }
+  .hero p {
+    color: var(--muted);
+    font-size: 14px;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+
+  /* ── レイアウト ── */
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+
+  /* ── ステップカード ── */
+  .step {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 0 24px;
+    margin-bottom: 16px;
+    position: relative;
+  }
+  .step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 31px;
+    top: 64px;
+    width: 2px;
+    bottom: -16px;
+    background: linear-gradient(to bottom, var(--border), transparent);
+  }
+  .step-num {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    font-weight: 900;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--accent);
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+  }
+  .step-num.done { color: var(--green); border-color: var(--green); }
+  .step-body {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 0;
+  }
+  .step-body h2 {
+    font-size: 17px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: var(--text);
+  }
+  .step-body p {
+    font-size: 14px;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+  .step-body p:last-child { margin-bottom: 0; }
+
+  /* ── 画面イメージ ── */
+  .mockup {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    margin: 16px 0;
+    background: var(--surface2);
+  }
+  .mockup-bar {
+    background: #1E2235;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot-r { background: #FF5F57; }
+  .dot-y { background: #FEBC2E; }
+  .dot-g { background: #28C840; }
+  .url-bar {
+    flex: 1;
+    background: #151828;
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .url-bar span { color: var(--green); }
+  .mockup-body { padding: 20px; }
+
+  /* ── Twitch風UI ── */
+  .twitch-page {
+    background: #0E0E10;
+    border-radius: 8px;
+    padding: 20px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .twitch-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #2A2A2E;
+  }
+  .twitch-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--twitch);
+  }
+  .twitch-logo svg { width: 24px; height: 24px; fill: var(--twitch); }
+  .t-title {
+    font-size: 13px;
+    color: #ADADB8;
+    margin-bottom: 16px;
+  }
+  .t-btn {
+    display: inline-block;
+    background: var(--twitch);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .t-btn:hover { background: var(--twitch-d); }
+
+  /* twitchtokengenerator風 */
+  .ttg-page {
+    background: #1a1a2e;
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .ttg-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #9147ff;
+    margin-bottom: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .ttg-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #2a2a4e;
+    border: 1px solid #9147ff44;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .ttg-btn:hover { background: #3a3a6e; }
+  .ttg-btn-icon { font-size: 24px; }
+  .ttg-btn-label { font-size: 13px; color: #ccc; font-family: 'JetBrains Mono', monospace; }
+  .ttg-btn-label strong { color: white; display: block; font-size: 14px; margin-bottom: 2px; }
+  .ttg-btn.highlight { border-color: #9147ff; background: #3a2a6e; }
+  .ttg-btn.highlight .ttg-btn-label { color: #ddd; }
+
+  /* token result */
+  .token-box {
+    background: #0A0C14;
+    border: 1px solid var(--green);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-top: 12px;
+  }
+  .token-label {
+    font-size: 11px;
+    color: var(--green);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.1em;
+    margin-bottom: 6px;
+  }
+  .token-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text);
+    word-break: break-all;
+  }
+  .token-value .prefix { color: var(--warn); }
+  .token-value .secret { color: var(--muted); }
+
+  /* ── アプリ入力画面 ── */
+  .app-screen {
+    background: #0D0F1A;
+    border-radius: 8px;
+    padding: 20px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .app-title { font-size: 14px; font-weight: 700; color: var(--accent); margin-bottom: 16px; }
+  .app-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .app-input {
+    background: #242840;
+    border: 1px solid #3C4470;
+    border-radius: 6px;
+    padding: 9px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text);
+    width: 100%;
+    margin-bottom: 14px;
+  }
+  .app-input.filled { border-color: var(--green); color: var(--green); }
+  .app-btn {
+    background: var(--green);
+    color: #0D0F1A;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+
+  /* ── ハイライト矢印 ── */
+  .arrow-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0;
+    font-size: 13px;
+    color: var(--warn);
+    font-weight: 700;
+  }
+  .arrow-row svg { flex-shrink: 0; }
+
+  /* ── コールアウト ── */
+  .callout {
+    display: flex;
+    gap: 12px;
+    background: rgba(100,180,255,0.06);
+    border: 1px solid rgba(100,180,255,0.2);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin: 12px 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .callout.warn {
+    background: rgba(255,200,50,0.06);
+    border-color: rgba(255,200,50,0.25);
+  }
+  .callout.ok {
+    background: rgba(80,220,160,0.06);
+    border-color: rgba(80,220,160,0.25);
+  }
+  .callout-icon { font-size: 18px; flex-shrink: 0; line-height: 1.4; }
+  .callout p { margin: 0; }
+  .callout strong { color: var(--text); }
+
+  /* ── コードスニペット ── */
+  .code {
+    display: inline-block;
+    background: #1A1E2E;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--warn);
+  }
+
+  /* ── 完了バナー ── */
+  .done-banner {
+    background: linear-gradient(135deg, rgba(80,220,160,0.1), rgba(80,220,160,0.05));
+    border: 1px solid rgba(80,220,160,0.3);
+    border-radius: var(--radius);
+    padding: 24px;
+    text-align: center;
+    margin-top: 40px;
+  }
+  .done-banner .icon { font-size: 40px; margin-bottom: 12px; }
+  .done-banner h3 { font-size: 18px; font-weight: 700; color: var(--green); margin-bottom: 6px; }
+  .done-banner p { font-size: 13px; color: var(--muted); }
+
+  /* ── フッター ── */
+  footer {
+    text-align: center;
+    padding: 32px 24px;
+    font-size: 12px;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .highlight-box {
+    background: rgba(255,200,50,0.08);
+    border-left: 3px solid var(--warn);
+    border-radius: 0 8px 8px 0;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--text);
+    margin: 10px 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- ヒーロー -->
+<div class="hero">
+  <div class="hero-badge">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    SETUP GUIDE
+  </div>
+  <h1>Twitch <span>OAuth トークン</span><br>取得ガイド</h1>
+  <p>ChatViewPlayGame を Twitch チャットに接続するために必要なトークンを取得します。所要時間 約2〜3分。</p>
+</div>
+
+<div class="container">
+
+  <!-- STEP 1 -->
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-body">
+      <h2>サイトにアクセスする</h2>
+      <p>以下のURLをブラウザで開いてください。Twitch公式が認可したトークン生成ツールです。</p>
+
+      <div class="mockup">
+        <div class="mockup-bar">
+          <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
+          <div class="url-bar">🔒 <span>twitchtokengenerator.com</span></div>
+        </div>
+        <div class="mockup-body">
+          <div class="ttg-page">
+            <div class="ttg-title">✦ Twitch Token Generator by swiftyspiffy</div>
+            <p style="font-size:12px;color:#888;margin-bottom:16px;font-family:'JetBrains Mono',monospace;">I am here to get a...</p>
+            <div class="ttg-btn highlight">
+              <div class="ttg-btn-icon">🤖</div>
+              <div class="ttg-btn-label">
+                <strong>Bot Chat Token</strong>
+                チャット読み取り用トークン（こちらを選ぶ）
+              </div>
+            </div>
+            <div class="ttg-btn" style="opacity:0.4;">
+              <div class="ttg-btn-icon">⚙️</div>
+              <div class="ttg-btn-label">
+                <strong>Custom Scope Token</strong>
+                カスタムスコープ
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        <strong>「Bot Chat Token」</strong>をクリック
+      </div>
+
+      <div class="callout">
+        <div class="callout-icon">🔗</div>
+        <p>URL: <a href="https://twitchtokengenerator.com/" target="_blank">https://twitchtokengenerator.com/</a></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 2 -->
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-body">
+      <h2>Twitch にログインして認証する</h2>
+      <p>「Bot Chat Token」をクリックすると Twitch の認証画面が開きます。</p>
+
+      <div class="mockup">
+        <div class="mockup-bar">
+          <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
+          <div class="url-bar">🔒 <span>id.twitch.tv</span>/oauth2/authorize...</div>
+        </div>
+        <div class="mockup-body">
+          <div class="twitch-page">
+            <div class="twitch-header">
+              <div class="twitch-logo">
+                <svg viewBox="0 0 24 24"><path d="M11.64 5.93h1.43v4.28h-1.43m3.93-4.28H17v4.28h-1.43M7 2L3.43 5.57v12.86h4.28V22l3.58-3.57h2.85L20.57 12V2m-1.43 9.29l-2.85 2.85h-2.86l-2.5 2.5v-2.5H7.71V3.43h11.43z"/></svg>
+                Twitch
+              </div>
+              <div style="font-size:11px;color:#777;">id.twitch.tv</div>
+            </div>
+            <div class="t-title">TwitchTokenGenerator があなたのアカウントへのアクセスを要求しています</div>
+            <div style="background:#1a1a2a;border-radius:8px;padding:12px;margin-bottom:16px;">
+              <div style="font-size:12px;color:#ADADB8;margin-bottom:8px;">許可するスコープ:</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#ccc;">
+                  <span style="color:#50DCA0;">✓</span> chat:read — チャットの読み取り
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#ccc;">
+                  <span style="color:#50DCA0;">✓</span> chat:edit — チャットへの送信
+                </div>
+              </div>
+            </div>
+            <button class="t-btn">✓ 許可する（Authorize）</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        <strong>「許可する（Authorize）」</strong>をクリック
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-icon">⚠️</div>
+        <p><strong>必ずゲームで使う Twitch アカウントでログインしてください。</strong><br>配信しているアカウントと同じで構いません。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 3 -->
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-body">
+      <h2>ACCESS TOKEN をコピーする</h2>
+      <p>認証が完了するとトークンが表示されます。<strong style="color:var(--warn);">ACCESS TOKEN</strong> の欄の値をコピーします。</p>
+
+      <div class="mockup">
+        <div class="mockup-bar">
+          <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
+          <div class="url-bar">🔒 <span>twitchtokengenerator.com</span></div>
+        </div>
+        <div class="mockup-body">
+          <div class="ttg-page">
+            <div class="ttg-title" style="color:#50DCA0;">✓ トークン取得完了</div>
+            <div class="token-box">
+              <div class="token-label">ACCESS TOKEN</div>
+              <div class="token-value">
+                <span class="secret">abcdef1234567890abcdef1234567890abcd</span>
+              </div>
+            </div>
+            <div class="token-box" style="border-color:var(--border);margin-top:8px;opacity:0.5;">
+              <div class="token-label" style="color:var(--muted);">REFRESH TOKEN</div>
+              <div class="token-value" style="color:var(--muted);font-size:11px;">（使用しません）</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="highlight-box">
+        📋 ACCESS TOKEN の値を<strong>まるごとコピー</strong>してください。<br>
+        REFRESH TOKEN は使いません。
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-icon">🔐</div>
+        <p><strong>トークンは秘密情報です。</strong>他人に見せたり、SNSに投稿したりしないでください。万が一漏れた場合は同サイトで「Revoke」して無効化できます。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 4 -->
+  <div class="step">
+    <div class="step-num done">4</div>
+    <div class="step-body">
+      <h2>アプリの設定画面に入力する</h2>
+      <p>ChatViewPlayGame を起動して「⚙ Settings」を開き、以下のように入力します。</p>
+
+      <div class="mockup">
+        <div class="mockup-bar">
+          <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
+          <div class="url-bar" style="color:var(--accent);">ChatViewPlayGame — 設定</div>
+        </div>
+        <div class="mockup-body">
+          <div class="app-screen">
+            <div class="app-title">⚙ Settings</div>
+            <div class="app-label">Twitch Channel Name:</div>
+            <div class="app-input filled">あなたのチャンネル名（小文字）</div>
+            <div class="app-label">OAuth Token (oauth:xxxxx):</div>
+            <div class="app-input filled">oauth:●●●●●●●●●●●●●●●●●●●●●●●●●●</div>
+            <button class="app-btn">💾 保存して戻る</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="highlight-box" style="border-color:var(--warn);">
+        ⚠️ トークンの先頭に必ず <span class="code">oauth:</span> を付けてから入力してください。<br>
+        例: <span class="code">oauth:abcdef1234567890...</span>
+      </div>
+
+      <div class="callout ok">
+        <div class="callout-icon">✅</div>
+        <p><strong>入力完了したら「💾 保存して戻る」をクリック。</strong><br>トップメニューに「Ready ✅」と表示されれば設定完了です！</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 完了バナー -->
+  <div class="done-banner">
+    <div class="icon">🎉</div>
+    <h3>設定完了！</h3>
+    <p>あとはゲームを選んでスタートするだけです。<br>OBS では「ウィンドウキャプチャ」→「ChatViewPlayGame」を選択すれば配信に映せます。</p>
+  </div>
+
+  <!-- FAQ -->
+  <div style="margin-top:48px;">
+    <h2 style="font-size:16px;font-weight:700;margin-bottom:16px;color:var(--muted);letter-spacing:0.05em;">よくある質問</h2>
+
+    <div class="step-body" style="margin-bottom:12px;">
+      <h2 style="font-size:14px;">トークンはいつ期限切れになりますか？</h2>
+      <p>アクセストークンは約60日で期限切れになります。期限切れになったら同じ手順でトークンを再取得して設定し直してください。</p>
+    </div>
+
+    <div class="step-body" style="margin-bottom:12px;">
+      <h2 style="font-size:14px;">「接続エラー」と表示される場合は？</h2>
+      <p>① トークンに <span class="code">oauth:</span> が付いているか確認<br>② チャンネル名が小文字になっているか確認<br>③ トークンを再取得して再入力してみてください。</p>
+    </div>
+
+    <div class="step-body">
+      <h2 style="font-size:14px;">トークンが漏れてしまった場合は？</h2>
+      <p><a href="https://twitchtokengenerator.com/" target="_blank">twitchtokengenerator.com</a> にアクセスして「Revoke Your Access Token」セクションで無効化できます。その後、再取得して設定し直してください。</p>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  ChatViewPlayGame — Twitch OAuth トークン取得ガイド<br>
+  <a href="https://twitchtokengenerator.com/" target="_blank">twitchtokengenerator.com</a> は外部サービスです。
+</footer>
+
+</body>
+</html>
