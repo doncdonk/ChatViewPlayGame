@@ -1,5 +1,6 @@
 # ── 設定ファイル（トークン・チャンネル名を含む） ──
 config.json
+ChatViewPlayGame_release.zip
 
 # ── PyInstaller ──
 build/
