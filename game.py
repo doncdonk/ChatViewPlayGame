@@ -22,6 +22,7 @@ from config import load_config, save_config
 from minesweeper import Minesweeper
 from twitch_client import TwitchClient
 from reversi import Reversi, BLACK, WHITE, EMPTY
+from horserace import generate_race, run_race, IconHorseRenderer
 
 # ══════════════════════════════════════════════
 #  定数
@@ -136,11 +137,26 @@ BTN_DARK=BTN_DARK_H=BTN_MENU=BTN_MENU_H=DISABLED_BG=DISABLED_FG=""
 NUM_COLORS=[]; DANMAKU_COLORS=[]
 apply_theme("NightBlue")
 
+# ── 解像度プリセット ────────────────────────────
+RESOLUTIONS = {
+    "1280x720  (720p)":  (1280, 720),
+    "1600x900  (900p)":  (1600, 900),
+    "1920x1080 (1080p)": (1920, 1080),
+}
+DEFAULT_RES = "1600x900  (900p)"
+
+def calc_cell(cols, rows, win_w, win_h, sidebar_w, header_h):
+    """盤面セルサイズを解像度に合わせて自動計算"""
+    avail_w = win_w - sidebar_w
+    avail_h = win_h - header_h
+    return max(10, min(avail_w // cols, avail_h // rows))
+
+
 # 固定難易度プリセット
 PRESET_DIFFICULTIES = {
     "小  9×9   地雷10":  (9,  9,  10),
     "中  16×16  地雷40": (16, 16, 40),
-    "大  30×16  地雷99": (30, 16, 99),
+    "大  26×16  地雷99": (26, 16, 99),
 }
 
 # 連続モードの難化ステップ（クリアごとに地雷+N個）
@@ -247,15 +263,58 @@ class SettingsScreen:
 
         root.title("ChatViewPlayGame - 設定")
         root.configure(bg=BG)
-        root.resizable(False, False)
 
+        # ── ヘッダー（固定）──
         make_label(root, "⚙  設定", fg=ACCENT_COL,
                    font=("Courier", 20, "bold")).pack(pady=(24, 4))
         make_label(root, "Twitch connection settings",
-                   fg=TEXT_G, font=("Courier", 11)).pack(pady=(0, 20))
+                   fg=TEXT_G, font=("Courier", 11)).pack(pady=(0, 8))
 
-        frame = tk.Frame(root, bg=BG)
-        frame.pack(padx=36)
+        # ── スクロール可能エリア ──
+        container = tk.Frame(root, bg=BG)
+        container.pack(fill="both", expand=True, padx=0, pady=0)
+
+        canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical",
+                                 command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        frame = tk.Frame(canvas, bg=BG)
+        frame_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(e):
+            canvas.itemconfig(frame_id, width=e.width)
+        frame.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # マウスホイールでスクロール
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # padxはframe側で
+        frame.configure(padx=36)
+
+        # ── ウィンドウサイズ ──
+        make_label(frame, "Window Size:",
+                   font=("Courier", 12, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
+        self.res_var = tk.StringVar(value=cfg.get("resolution", DEFAULT_RES))
+        res_frame = tk.Frame(frame, bg=BG)
+        res_frame.pack(fill="x", pady=(0, 14))
+        for name in RESOLUTIONS:
+            tk.Radiobutton(res_frame, text=name, variable=self.res_var, value=name,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier", 11), anchor="w").pack(fill="x", pady=1)
+        make_label(frame, "* Takes effect on next game start",
+                   fg=TEXT_G, font=("Courier", 9)).pack(anchor="w", pady=(0, 10))
+
+        tk.Frame(frame, bg=CELL_BORDER, height=1).pack(fill="x", pady=(0, 12))
 
         # ── テーマ選択 ──
         make_label(frame, "Theme:",
@@ -317,12 +376,46 @@ class SettingsScreen:
         if not token.startswith("oauth:"):
             self.err_var.set("⚠ トークンは oauth: から始まります")
             return
-        self.cfg["channel"] = channel
-        self.cfg["token"]   = token
-        self.cfg["theme"]   = self.theme_var.get()
+        res_changed = self.res_var.get() != self.cfg.get("resolution", DEFAULT_RES)
+        self.cfg["channel"]    = channel
+        self.cfg["token"]      = token
+        self.cfg["theme"]      = self.theme_var.get()
+        self.cfg["resolution"] = self.res_var.get()
         apply_theme(self.cfg["theme"])
         save_config(self.cfg)
-        self.on_back()
+        if res_changed:
+            self._show_restart_prompt()
+        else:
+            self.on_back()
+
+    def _show_restart_prompt(self):
+        """解像度変更時の再起動ダイアログ"""
+        # 既存のウィジェットを一旦隠してプロンプトを表示
+        for w in self.root.winfo_children():
+            w.pack_forget()
+
+        frame = tk.Frame(self.root, bg=BG)
+        frame.pack(expand=True)
+
+        make_label(frame, "✅  設定を保存しました",
+                   fg=SAFE_COL, font=("Courier", 16, "bold")).pack(pady=(40, 8))
+        make_label(frame, "ウィンドウサイズの変更を反映するには",
+                   fg=TEXT_W, font=("Courier", 12)).pack()
+        make_label(frame, "アプリを再起動してください。",
+                   fg=TEXT_W, font=("Courier", 12)).pack(pady=(0, 32))
+
+        bf = tk.Frame(frame, bg=BG)
+        bf.pack()
+        make_btn(bf, "↩  再起動せず戻る", self.on_back,
+                 bg=BTN_DARK).pack(side="left", padx=(0, 12))
+        make_btn(bf, "🔄  今すぐ再起動", self._restart_app,
+                 bg=SAFE_COL, fg=BG).pack(side="left")
+
+    def _restart_app(self):
+        """アプリを再起動する"""
+        self.root.destroy()
+        import subprocess
+        subprocess.Popen([sys.executable] + sys.argv)
 
     def _back(self):
         apply_theme(self.cfg.get("theme", "NightBlue"))
@@ -352,7 +445,7 @@ GAME_CATALOG = [
         "icon":    "🏇",
         "title":   "競馬",
         "desc":    "コメントでレースに投票して参加",
-        "ready":   False,
+        "ready":   True,
     },
 ]
 
@@ -365,7 +458,6 @@ class TopMenuScreen:
 
         root.title("ChatViewPlayGame")
         root.configure(bg=BG)
-        root.resizable(False, False)
 
         # ヘッダー
         make_label(root, "🎮 ChatViewPlayGame",
@@ -465,7 +557,6 @@ class MinesweeperLobby:
 
         root.title("ChatViewPlayGame - ViewBomb")
         root.configure(bg=BG)
-        root.resizable(False, False)
 
         make_label(root, "💣 ViewBomb",
                    fg=ACCENT_COL, font=("Courier", 20, "bold")).pack(pady=(24, 4))
@@ -543,6 +634,26 @@ class MinesweeperLobby:
         tk.Label(frame, textvariable=self.err_var, bg=BG, fg=MINE_COL,
                  font=("Courier", 11)).pack(pady=(10, 0))
 
+        # ── 座標文字サイズ ──
+        make_label(frame, "座標文字サイズ:",
+                   font=("Courier", 12, "bold"), anchor="w").pack(fill="x", pady=(14, 4))
+        coord_row = tk.Frame(frame, bg=BG)
+        coord_row.pack(fill="x")
+        self.coord_size_var = tk.IntVar(value=cfg.get("ms_coord_size", 0))
+        tk.Label(coord_row, text="小", bg=BG, fg=TEXT_G,
+                 font=("Courier", 11)).pack(side="left")
+        coord_slider = tk.Scale(coord_row, from_=0, to=8,
+                                variable=self.coord_size_var,
+                                orient="horizontal", length=200,
+                                bg=BG, fg=TEXT_W, troughcolor=CELL_HID,
+                                highlightthickness=0, showvalue=True,
+                                activebackground=ACCENT_COL)
+        coord_slider.pack(side="left", padx=8)
+        tk.Label(coord_row, text="大", bg=BG, fg=TEXT_G,
+                 font=("Courier", 11)).pack(side="left")
+        make_label(frame, "0=自動（セルサイズ連動）  1〜8=固定サイズ加算",
+                   fg=TEXT_G, font=("Courier", 9)).pack(anchor="w", pady=(2, 0))
+
         # ボタン
         bf = tk.Frame(frame, bg=BG)
         bf.pack(fill="x", pady=(10, 24))
@@ -575,7 +686,7 @@ class MinesweeperLobby:
             mines = int(self.custom_mines.get())
         except ValueError:
             return None
-        if not (2 <= cols <= 30 and 2 <= rows <= 30):
+        if not (2 <= cols <= 26 and 2 <= rows <= 30):
             return None
         max_mines = cols * rows - 9
         if not (1 <= mines <= max_mines):
@@ -593,11 +704,12 @@ class MinesweeperLobby:
 
         diff = self._parse_difficulty()
         if diff is None:
-            self.err_var.set("⚠ Invalid custom values (cols/rows: 2-30, mines: 1+)")
+            self.err_var.set("⚠ Invalid custom values (cols: 2-26, rows: 2-30, mines: 1+)")
             return
 
-        self.cfg["ms_mode"]       = mode
-        self.cfg["ms_difficulty"] = self.diff_var.get()
+        self.cfg["ms_mode"]        = mode
+        self.cfg["ms_difficulty"]  = self.diff_var.get()
+        self.cfg["ms_coord_size"]  = self.coord_size_var.get()
         save_config(self.cfg)
 
         cols, rows, mines = diff
@@ -619,10 +731,21 @@ class GameScreen:
         self.on_menu   = on_menu
         self.stage     = stage   # 連続モードのステージ番号
 
-        self.board_w = cols * CELL
-        self.board_h = rows * CELL
-        self.win_w   = self.board_w + SIDEBAR_W
-        self.win_h   = self.board_h + HEADER_H
+        # 解像度設定からウィンドウサイズとセルサイズを決定
+        res_name   = cfg.get("resolution", DEFAULT_RES)
+        win_w, win_h = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
+        self.cell  = calc_cell(cols, rows, win_w, win_h, SIDEBAR_W, HEADER_H)
+        self.coord_size = cfg.get("ms_coord_size", 0)  # 0=自動、1〜8=加算
+        self.board_w = cols * self.cell
+        self.board_h = rows * self.cell
+        # 実際のウィンドウは固定解像度
+        self.win_w   = win_w
+        self.win_h   = win_h
+        # 盤面の描画オフセット（中央寄せ）
+        board_area_w = win_w - SIDEBAR_W
+        board_area_h = win_h - HEADER_H
+        self.board_ox = (board_area_w - self.board_w) // 2
+        self.board_oy = HEADER_H + (board_area_h - self.board_h) // 2
 
         root.title("ChatViewPlayGame")
         root.configure(bg=BG)
@@ -763,18 +886,18 @@ class GameScreen:
 
     # ── マウス ────────────────────────────────
     def _menu_btn_rect(self):
-        bx = self.board_w - 112
-        return bx, 6, bx + 104, 36
+        bx = self.win_w - SIDEBAR_W - 116
+        return bx, 6, bx + 108, 36
 
     def _copy_btn_rect(self):
         """サイドバー内のコピーボタン領域"""
-        sx = self.board_w
+        sx = self.win_w - SIDEBAR_W
         return sx + 8, self.win_h - 58, self.win_w - 8, self.win_h - 8
 
     def _cell_at(self, x, y):
-        col = x // CELL
-        row = (y - HEADER_H) // CELL
-        if 0 <= col < self.cols and 0 <= row < self.rows and y > HEADER_H:
+        col = (x - self.board_ox) // self.cell
+        row = (y - self.board_oy) // self.cell
+        if 0 <= col < self.cols and 0 <= row < self.rows and y > self.board_oy:
             return col, row
         return None, None
 
@@ -817,8 +940,8 @@ class GameScreen:
     def _do_action(self, username, col, row, is_flag):
         if self.ms.game_over or self.ms.cleared:
             return
-        cx = col * CELL + CELL // 2
-        cy = row * CELL + HEADER_H + CELL // 2
+        cx = self.board_ox + col * self.cell + self.cell // 2
+        cy = self.board_oy + row * self.cell + self.cell // 2
 
         if is_flag:
             self.ms.toggle_flag(col, row)
@@ -861,36 +984,43 @@ class GameScreen:
         c = self.canvas
         for row in range(self.rows):
             for col in range(self.cols):
-                x1 = col * CELL
-                y1 = row * CELL + HEADER_H
-                x2, y2 = x1 + CELL, y1 + CELL
+                x1 = self.board_ox + col * self.cell
+                y1 = self.board_oy + row * self.cell
+                x2, y2 = x1 + self.cell, y1 + self.cell
                 cell  = self.ms.get_cell(col, row)
                 hover = (self.hover == (col, row))
                 tag   = f"cell_{col}_{row}"
                 c.delete(tag)
+                half  = self.cell // 2
+                nfont = max(8, self.cell - 22)
+                if self.coord_size == 0:
+                    lfont = max(7, self.cell - 28)
+                else:
+                    lfont = 6 + self.coord_size
 
                 if cell["open"]:
                     c.create_rectangle(x1,y1,x2,y2,
                         fill=CELL_OPEN, outline=CELL_BORDER, tags=tag)
                     if cell["mine"] and self.ms.game_over:
-                        c.create_oval(x1+6,y1+6,x2-6,y2-6,
+                        pad = max(4, self.cell//7)
+                        c.create_oval(x1+pad,y1+pad,x2-pad,y2-pad,
                             fill=MINE_COL, outline="", tags=tag)
                     elif cell["number"] and cell["number"] > 0:
-                        c.create_text(x1+CELL//2, y1+CELL//2,
+                        c.create_text(x1+half, y1+half,
                             text=str(cell["number"]),
                             fill=NUM_COLORS[cell["number"]],
-                            font=("Courier",16,"bold"), tags=tag)
+                            font=("Courier",nfont,"bold"), tags=tag)
                 else:
                     bg = CELL_HOV if hover else CELL_HID
                     c.create_rectangle(x1,y1,x2,y2,
                         fill=bg, outline=CELL_BORDER, tags=tag)
                     if cell["flag"]:
-                        c.create_text(x1+CELL//2, y1+CELL//2,
-                            text="🚩", font=("Courier",14), tags=tag)
+                        c.create_text(x1+half, y1+half,
+                            text="🚩", font=("Courier",lfont), tags=tag)
                     else:
                         lbl = chr(ord('A')+col) + str(row+1)
-                        c.create_text(x1+4, y1+3, text=lbl, anchor="nw",
-                            fill="#6878A8", font=("Courier",11), tags=tag)
+                        c.create_text(x1+3, y1+2, text=lbl, anchor="nw",
+                            fill="#6878A8", font=("Courier",lfont), tags=tag)
 
     def _draw_header(self):
         c = self.canvas
@@ -927,7 +1057,7 @@ class GameScreen:
 
         # 右下: 操作ガイド
         guide = "左クリック:開く  右クリック:フラグ  /  チャット: A1 / flag A1"
-        c.create_text(self.board_w - 10, 74, text=guide,
+        c.create_text(self.win_w - SIDEBAR_W - 10, 74, text=guide,
             fill=TEXT_G, anchor="ne",
             font=("Courier", 9), tags="header")
 
@@ -943,7 +1073,7 @@ class GameScreen:
     def _draw_sidebar(self):
         c = self.canvas
         c.delete("sidebar")
-        sx = self.board_w
+        sx = self.win_w - SIDEBAR_W
         c.create_rectangle(sx,0,self.win_w,self.win_h,
             fill=SIDEBAR_BG, outline="", tags="sidebar")
         c.create_line(sx,0,sx,self.win_h,
@@ -970,7 +1100,7 @@ class GameScreen:
                 break
 
         if self.boom_user and self.ms.game_over:
-            bx1, by1 = sx+8, self.win_h-138
+            bx1, by1 = sx+8, self.win_h-148
             bx2, by2 = self.win_w-8, self.win_h-68
             c.create_rectangle(bx1,by1,bx2,by2,
                 fill=BOOM_BG, outline=MINE_COL, width=2, tags="sidebar")
@@ -1003,10 +1133,12 @@ class GameScreen:
     def _draw_overlay(self):
         c = self.canvas
         c.delete("overlay")
-        bx, by = self.board_w // 2, HEADER_H + self.board_h // 2
+        bx = self.board_ox + self.board_w // 2
+        by = self.board_oy + self.board_h // 2
 
         if self.ms.game_over:
-            c.create_rectangle(0,HEADER_H,self.board_w,self.win_h,
+            c.create_rectangle(self.board_ox, self.board_oy,
+                self.board_ox+self.board_w, self.board_oy+self.board_h,
                 fill="#000000", stipple="gray50", outline="", tags="overlay")
             c.create_text(bx, by-40, text="💥 GAME OVER",
                 fill=MINE_COL, font=("Courier",36,"bold"), tags="overlay")
@@ -1063,7 +1195,6 @@ class ReversiLobby:
 
         root.title("ChatViewPlayGame - チャットvsリバーシ")
         root.configure(bg=BG)
-        root.resizable(False, False)
 
         make_label(root, "♟ チャットvsリバーシ",
                    fg=ACCENT_COL, font=("Courier", 20, "bold")).pack(pady=(24,4))
@@ -1125,13 +1256,25 @@ class ReversiLobby:
 # ══════════════════════════════════════════════
 #  リバーシ ゲーム画面
 # ══════════════════════════════════════════════
-RV_CELL      = 56      # 1マスのサイズ
-RV_LABEL_W   = 24      # 座標ラベル幅
-RV_BOARD_OFF = 8       # 盤面の左上オフセット（盤面枠）
 RV_SIDEBAR_W = 280
 RV_HEADER_H  = 80
-RV_WIN_W     = 8*RV_CELL + RV_BOARD_OFF*2 + RV_LABEL_W*2 + RV_SIDEBAR_W
-RV_WIN_H     = 8*RV_CELL + RV_BOARD_OFF*2 + RV_LABEL_W*2 + RV_HEADER_H
+RV_LABEL_W   = 24
+RV_BOARD_OFF = 8
+
+def calc_rv_layout(win_w, win_h):
+    """解像度からリバーシのセルサイズと盤面オフセットを計算"""
+    avail_w = win_w - RV_SIDEBAR_W - RV_BOARD_OFF*2 - RV_LABEL_W*2
+    avail_h = win_h - RV_HEADER_H  - RV_BOARD_OFF*2 - RV_LABEL_W*2
+    cell = max(32, min(avail_w // 8, avail_h // 8))
+    board_px_w = cell * 8 + RV_BOARD_OFF*2 + RV_LABEL_W*2
+    board_px_h = cell * 8 + RV_BOARD_OFF*2 + RV_LABEL_W*2
+    ox = (win_w - RV_SIDEBAR_W - board_px_w) // 2
+    oy = RV_HEADER_H + (win_h - RV_HEADER_H - board_px_h) // 2
+    return cell, ox, oy
+
+RV_CELL = 56
+RV_WIN_W = 8*RV_CELL + RV_BOARD_OFF*2 + RV_LABEL_W*2 + RV_SIDEBAR_W
+RV_WIN_H = 8*RV_CELL + RV_BOARD_OFF*2 + RV_LABEL_W*2 + RV_HEADER_H
 
 class ReversiGameScreen:
     def __init__(self, root, cfg, max_vote_sec, tiebreak, on_menu):
@@ -1143,9 +1286,12 @@ class ReversiGameScreen:
 
         root.title("ChatViewPlayGame - チャットvsリバーシ")
         root.configure(bg=BG)
-        root.resizable(False, False)
 
-        self.canvas = tk.Canvas(root, width=RV_WIN_W, height=RV_WIN_H,
+        res_name = cfg.get("resolution", DEFAULT_RES)
+        self.rv_win_w, self.rv_win_h = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
+        self.rv_cell, self.rv_ox, self.rv_oy = calc_rv_layout(self.rv_win_w, self.rv_win_h)
+
+        self.canvas = tk.Canvas(root, width=self.rv_win_w, height=self.rv_win_h,
                                 bg=BG, highlightthickness=0)
         self.canvas.pack()
 
@@ -1323,26 +1469,26 @@ class ReversiGameScreen:
     # ── 座標ヘルパー ──────────────────────────
     def _board_xy(self):
         """盤面左上座標"""
-        return RV_BOARD_OFF + RV_LABEL_W, RV_HEADER_H + RV_BOARD_OFF + RV_LABEL_W
+        return self.rv_ox + RV_BOARD_OFF + RV_LABEL_W, self.rv_oy + RV_BOARD_OFF + RV_LABEL_W
 
     def _cell_at(self, mx, my):
         bx, by = self._board_xy()
-        col = (mx - bx) // RV_CELL
-        row = (my - by) // RV_CELL
+        col = (mx - bx) // self.rv_cell
+        row = (my - by) // self.rv_cell
         if 0 <= col < 8 and 0 <= row < 8:
             return col, row
         return None, None
 
     def _menu_btn_rect(self):
-        bx = RV_WIN_W - RV_SIDEBAR_W - 116
+        bx = self.rv_win_w - RV_SIDEBAR_W - 116
         return bx, 6, bx+108, 36
 
     def _copy_btn_rect(self):
-        sx = RV_WIN_W - RV_SIDEBAR_W
-        return sx+8, RV_WIN_H-58, RV_WIN_W-8, RV_WIN_H-8
+        sx = self.rv_win_w - RV_SIDEBAR_W
+        return sx+8, self.rv_win_h-58, self.rv_win_w-8, self.rv_win_h-8
 
     def _sidebar_x(self):
-        return RV_WIN_W - RV_SIDEBAR_W
+        return self.rv_win_w - RV_SIDEBAR_W
 
     # ── 描画 ─────────────────────────────────
     def _draw_all(self):
@@ -1356,8 +1502,8 @@ class ReversiGameScreen:
     def _draw_header(self):
         c = self.canvas
         c.delete("rv_header")
-        board_px = 8*RV_CELL + RV_BOARD_OFF*2
-        c.create_rectangle(0,0,RV_WIN_W,RV_HEADER_H,
+        board_px = self.rv_win_w - RV_SIDEBAR_W
+        c.create_rectangle(0,0,self.rv_win_w,RV_HEADER_H,
             fill=HEADER_BG, outline="", tags="rv_header")
 
         # タイトル
@@ -1378,7 +1524,7 @@ class ReversiGameScreen:
             fill=TEXT_G, font=("Courier",16,"bold"), tags="rv_header")
 
         # ステータス
-        c.create_text(cx, 50, text=self.status_msg,
+        c.create_text(cx, 55, text=self.status_msg,
             fill=SAFE_COL if not self.voting else FLAG_COL,
             font=("Courier",11), tags="rv_header")
 
@@ -1397,16 +1543,17 @@ class ReversiGameScreen:
         bx, by = self._board_xy()
         legal  = self.rv.legal_moves()
 
+        cell = self.rv_cell
         # 盤面背景
         c.create_rectangle(bx-RV_BOARD_OFF, by-RV_BOARD_OFF,
-            bx+8*RV_CELL+RV_BOARD_OFF, by+8*RV_CELL+RV_BOARD_OFF,
+            bx+8*cell+RV_BOARD_OFF, by+8*cell+RV_BOARD_OFF,
             fill="#1A3A1A", outline=CELL_BORDER, width=2, tags="rv_board")
 
         for row in range(8):
             for col in range(8):
-                x1 = bx + col*RV_CELL
-                y1 = by + row*RV_CELL
-                x2, y2 = x1+RV_CELL, y1+RV_CELL
+                x1 = bx + col*cell
+                y1 = by + row*cell
+                x2, y2 = x1+cell, y1+cell
                 is_legal  = (row,col) in legal
                 is_hover  = (self.hover == (row,col))
                 is_last   = (self.rv.last_move == (row,col))
@@ -1420,9 +1567,9 @@ class ReversiGameScreen:
 
                 # 合法手ヒント（薄い丸）
                 if is_legal and self.rv.turn == BLACK and not self.voting:
-                    r = RV_CELL//6
-                    cx2 = x1+RV_CELL//2
-                    cy2 = y1+RV_CELL//2
+                    r = cell//6
+                    cx2 = x1+cell//2
+                    cy2 = y1+cell//2
                     c.create_oval(cx2-r,cy2-r,cx2+r,cy2+r,
                         fill="#4A9A4A", outline="", tags="rv_board")
 
@@ -1430,9 +1577,9 @@ class ReversiGameScreen:
                 stone = self.rv.board[row][col]
                 if stone != EMPTY:
                     pad = 6
-                    scx = x1+RV_CELL//2
-                    scy = y1+RV_CELL//2
-                    sr  = RV_CELL//2 - pad
+                    scx = x1+cell//2
+                    scy = y1+cell//2
+                    sr  = cell//2 - pad
                     col_fill = "#111111" if stone == BLACK else "#EEEEEE"
                     outline_c = "#444444" if stone == BLACK else "#AAAAAA"
                     if is_last:
@@ -1443,27 +1590,26 @@ class ReversiGameScreen:
                 # マス内座標
                 if stone == EMPTY:
                     coord = chr(65+col) + str(row+1)
+                    cf = max(7, cell-44)
                     if is_legal and self.voting:
-                        # チャットターン：合法手は白でくっきり強調
-                        c.create_text(x1+5, y1+4, text=coord, anchor="nw",
-                            fill="#FFFFFF", font=("Courier",11,"bold"), tags="rv_board")
+                        c.create_text(x1+4, y1+3, text=coord, anchor="nw",
+                            fill="#FFFFFF", font=("Courier",cf+2,"bold"), tags="rv_board")
                     elif not is_legal:
-                        # 置けないマスは薄く
-                        c.create_text(x1+5, y1+4, text=coord, anchor="nw",
-                            fill="#3A6A3A", font=("Courier",9), tags="rv_board")
+                        c.create_text(x1+4, y1+3, text=coord, anchor="nw",
+                            fill="#3A6A3A", font=("Courier",cf), tags="rv_board")
                     # 配信者ターンの合法手マスは丸ヒントのみで座標は非表示
 
         # ── 外周座標ラベル ──────────────────────
         # 列ラベル（A〜H）上下
         for col in range(8):
-            lx = bx + col*RV_CELL + RV_CELL//2
+            lx = bx + col*cell + cell//2
             lbl = chr(65+col)
             # 上
-            c.create_text(lx, by - RV_LABEL_W//2,
+            c.create_text(lx, by - RV_LABEL_W//2 - RV_BOARD_OFF//2,
                 text=lbl, fill=ACCENT_COL,
                 font=("Courier",13,"bold"), tags="rv_board")
             # 下
-            c.create_text(lx, by + 8*RV_CELL + RV_LABEL_W//2,
+            c.create_text(lx, by + 8*cell + RV_LABEL_W//2 + RV_BOARD_OFF//2,
                 text=lbl, fill=ACCENT_COL,
                 font=("Courier",13,"bold"), tags="rv_board")
 
@@ -1472,19 +1618,19 @@ class ReversiGameScreen:
             ly = by + row*RV_CELL + RV_CELL//2
             lbl = str(row+1)
             # 左
-            c.create_text(bx - RV_LABEL_W//2, ly,
+            c.create_text(bx - RV_LABEL_W//2 - RV_BOARD_OFF//2, ly,
                 text=lbl, fill=ACCENT_COL,
                 font=("Courier",13,"bold"), tags="rv_board")
             # 右
-            c.create_text(bx + 8*RV_CELL + RV_LABEL_W//2, ly,
+            c.create_text(bx + 8*cell + RV_LABEL_W//2 + RV_BOARD_OFF//2, ly,
                 text=lbl, fill=ACCENT_COL,
                 font=("Courier",13,"bold"), tags="rv_board")
 
         # ゲームオーバー表示
         if self.rv.game_over:
-            board_cx = bx + 4*RV_CELL
-            board_cy = by + 4*RV_CELL
-            c.create_rectangle(bx+20, board_cy-50, bx+8*RV_CELL-20, board_cy+60,
+            board_cx = bx + 4*cell
+            board_cy = by + 4*cell
+            c.create_rectangle(bx+20, board_cy-50, bx+8*cell-20, board_cy+60,
                 fill=BG, outline=ACCENT_COL, width=2, tags="rv_board")
             if self.rv.winner == BLACK:
                 msg = "You Win!"
@@ -1508,7 +1654,7 @@ class ReversiGameScreen:
         c.delete("rv_sidebar")
         sx = self._sidebar_x()
 
-        c.create_rectangle(sx,0,RV_WIN_W,RV_WIN_H,
+        c.create_rectangle(sx,0,self.rv_win_w,self.rv_win_h,
             fill=SIDEBAR_BG, outline="", tags="rv_sidebar")
         c.create_line(sx,0,sx,RV_WIN_H,
             fill=CELL_BORDER, width=2, tags="rv_sidebar")
@@ -1547,12 +1693,12 @@ class ReversiGameScreen:
             bar_full = RV_SIDEBAR_W - 24
             bar_now  = int(bar_full * ratio)
             bar_col  = SAFE_COL if ratio > 0.4 else FLAG_COL if ratio > 0.15 else MINE_COL
-            c.create_rectangle(sx+12, RV_WIN_H-90, sx+12+bar_full, RV_WIN_H-76,
+            c.create_rectangle(sx+12, self.rv_win_h-90, sx+12+bar_full, self.rv_win_h-76,
                 fill=CELL_HID, outline="", tags="rv_sidebar")
             if bar_now > 0:
-                c.create_rectangle(sx+12, RV_WIN_H-90, sx+12+bar_now, RV_WIN_H-76,
+                c.create_rectangle(sx+12, self.rv_win_h-90, sx+12+bar_now, self.rv_win_h-76,
                     fill=bar_col, outline="", tags="rv_sidebar")
-            c.create_text(sx+RV_SIDEBAR_W//2, RV_WIN_H-100,
+            c.create_text(sx+RV_SIDEBAR_W//2, self.rv_win_h-100,
                 text=f"{max(0,self.vote_timer):.0f}s  [Space = close]",
                 fill=bar_col, font=("Courier",10,"bold"), tags="rv_sidebar")
 
@@ -1584,12 +1730,935 @@ class ReversiGameScreen:
             c.create_text((cx1+cx2)//2, cy1+30,
                 text=self.hint_text[:32],
                 fill=TEXT_G, font=("Courier",8), tags="rv_sidebar")
+class HorseLobby:
+    def __init__(self, root, cfg, on_start, on_back):
+        self.root     = root
+        self.cfg      = cfg
+        self.on_start = on_start
+        self.on_back  = on_back
+
+        root.title("ChatViewPlayGame - 競馬")
+        root.configure(bg=BG)
+
+        make_label(root, "🏇 競馬",
+                   fg=ACCENT_COL, font=("Courier", 20, "bold")).pack(pady=(24,4))
+        make_label(root, "チャットで馬に投票してレースに参加！",
+                   fg=TEXT_G, font=("Courier", 11)).pack(pady=(0,18))
+
+        frame = tk.Frame(root, bg=BG)
+        frame.pack(padx=36)
+
+        make_label(frame, "投票時間:",
+                   font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(0,4))
+        self.vote_var = tk.IntVar(value=cfg.get("hr_vote_sec", 60))
+        vf = tk.Frame(frame, bg=BG)
+        vf.pack(fill="x")
+        for sec in [30, 60, 90, 120]:
+            tk.Radiobutton(vf, text=f"{sec}秒", variable=self.vote_var, value=sec,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier",11)).pack(side="left", padx=(0,16))
+
+        make_label(frame, "* チャットで馬の番号（例: 3）を入力して投票",
+                   fg=TEXT_G, font=("Courier",10)).pack(anchor="w", pady=(8,0))
+
+        make_label(frame, "レース数:",
+                   font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(14,4))
+        self.race_count_var = tk.StringVar(value=cfg.get("hr_race_count", "3"))
+        rcf = tk.Frame(frame, bg=BG)
+        rcf.pack(fill="x")
+        for val, label in [("1","1レース"),("3","3レース"),("5","5レース"),("10","10レース"),("0","無限")]:
+            tk.Radiobutton(rcf, text=label, variable=self.race_count_var, value=val,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier",11)).pack(side="left", padx=(0,12))
+
+        make_label(frame, "結果後の自動遷移:",
+                   font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(14,4))
+        self.auto_var = tk.IntVar(value=cfg.get("hr_auto_next", 0))
+        af = tk.Frame(frame, bg=BG)
+        af.pack(fill="x")
+        for sec, label in [(0,"なし（手動）"),(15,"15秒"),(30,"30秒"),(60,"60秒")]:
+            tk.Radiobutton(af, text=label, variable=self.auto_var, value=sec,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier",11)).pack(side="left", padx=(0,14))
+
+        self.err_var = tk.StringVar()
+        tk.Label(frame, textvariable=self.err_var, bg=BG, fg=MINE_COL,
+                 font=("Courier",11)).pack(pady=(8,0))
+
+        bf = tk.Frame(frame, bg=BG)
+        bf.pack(fill="x", pady=(14,24))
+        make_btn(bf, "◀  戻る", self.on_back).pack(side="left")
+        make_btn(bf, "▶  レース開始", self._start,
+                 bg=SAFE_COL, fg=BG).pack(side="right")
+
+    def _start(self):
+        if not self.cfg.get("channel") or not self.cfg.get("token","").startswith("oauth:"):
+            self.err_var.set("⚠ Settings not configured")
+            return
+        self.cfg["hr_vote_sec"]    = self.vote_var.get()
+        self.cfg["hr_auto_next"]   = self.auto_var.get()
+        self.cfg["hr_race_count"]  = self.race_count_var.get()
+        save_config(self.cfg)
+        race_count = int(self.race_count_var.get())
+        self.on_start(self.cfg, self.vote_var.get(), race_count)
+
+
+# ══════════════════════════════════════════════
+#  競馬 メイン画面
+#  フェーズ: vote → gate → race → goal → result
+# ══════════════════════════════════════════════
+HR_COLORS = [
+    "#FF4466","#4488FF","#44DD88","#FFCC00",
+    "#FF8800","#AA44FF","#00CCFF","#FF66AA",
+]
+HR_LANE_H  = 68   # 1レーンの高さ
+HR_INFO_W  = 320  # 左側馬情報パネル幅
+HR_FPS     = 30
+
+class HorseRaceScreen:
+    PHASES = ["vote", "gate", "race", "goal", "result"]
+
+    def __init__(self, root, cfg, vote_sec, race_count, on_menu):
+        self.root     = root
+        self.cfg      = cfg
+        self.vote_sec   = vote_sec
+        self.race_count = race_count   # 0=無限
+        self.on_menu    = on_menu
+
+        root.title("ChatViewPlayGame - 競馬")
+        root.configure(bg=BG)
+
+        res_name = cfg.get("resolution", DEFAULT_RES)
+        self.win_w, self.win_h = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
+
+        self.canvas = tk.Canvas(root, width=self.win_w, height=self.win_h,
+                                bg=BG, highlightthickness=0)
+        self.canvas.pack()
+
+        # レース生成
+        self.race    = generate_race(num_horses=8)
+        self.horses  = self.race["horses"]
+        self.results = None   # run_race後に設定
+
+        # 投票
+        self.votes      = {}   # {horse_number: count}
+        self.vote_timer = float(vote_sec)
+        self.voters     = {}   # {username: horse_number} 1人1票
+
+        # フェーズ管理
+        self.phase      = "vote"
+        self.phase_t    = 0.0   # フェーズ内経過時間
+        self.prev_time  = time.time()
+        self._running   = True
+
+        # アニメーション
+        self.anim_frame   = 0
+        self.horse_pos    = []  # レース中の各馬x座標 (0.0〜1.0)
+        self.gate_open    = False
+        self.finish_flash = 0.0
+        self.danmaku      = []
+
+        # 馬描画レンダラー（馬ごとに個別タグ）
+        self.renderers = [IconHorseRenderer(f"horse_{i}") for i in range(len(self.horses))]
+
+        # Twitch
+        self.twitch = TwitchClient(
+            cfg["channel"], cfg["token"],
+            on_command=self._on_cmd,
+            on_chat=self._on_chat,
+        )
+        threading.Thread(
+            target=lambda: asyncio.run(self.twitch.connect()), daemon=True
+        ).start()
+
+        root.bind("<space>", self._on_space)
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+        self.canvas.bind("<Motion>",   self._on_canvas_motion)
+        self.hover_horse   = None   # ホバー中の馬番号
+        self.my_vote       = None   # 配信者の投票番号（[配信者]）
+        self._vote_rects   = []     # [(num, x1,y1,x2,y2), ...]
+        self._result_btn   = None   # 結果画面ボタン座標
+        self._final_btn    = None   # 最終結果ボタン座標
+        self._transitioning = False  # 遷移中フラグ（2重防止）
+        self.auto_next_sec  = float(cfg.get("hr_auto_next", 0))
+        self.result_timer   = 0.0
+        self.current_race   = 1          # 現在のレース番号
+        # 累積成績: {username: {"votes": N, "hits": N}}
+        self.cumulative     = {}
+        self._loop()
+
+    # ── ループ ───────────────────────────────
+    def _loop(self):
+        if not self._running:
+            return
+        now = time.time()
+        dt  = now - self.prev_time
+        self.prev_time = now
+        self.anim_frame = (self.anim_frame + 1) % 4
+
+        self.phase_t += dt
+        for d in self.danmaku:
+            d.update(dt)
+        self.danmaku = [d for d in self.danmaku if d.alive]
+
+        if self.finish_flash > 0:
+            self.finish_flash = max(0.0, self.finish_flash - dt)
+
+        self._update_phase(dt)
+        self._draw()
+        self.root.after(1000 // HR_FPS, self._loop)
+
+    def _update_phase(self, dt):
+        if self.phase == "vote":
+            self.vote_timer -= dt
+            if self.vote_timer <= 0:
+                self._end_vote()
+
+        elif self.phase == "gate":
+            if self.phase_t >= 3.0:
+                self._start_race()
+
+        elif self.phase == "race":
+            # 距離に応じた速度係数（短距離は速く、長距離は遅く）
+            dist = self.race["distance"]
+            if dist <= 1400:
+                dist_factor = 1.30   # 短距離: 速め
+            elif dist <= 1800:
+                dist_factor = 1.10   # マイル: やや速め
+            elif dist <= 2200:
+                dist_factor = 1.00   # 中距離: 標準
+            elif dist <= 2800:
+                dist_factor = 0.85   # 中長距離: やや遅め
+            else:
+                dist_factor = 0.72   # 長距離: 遅め（長く楽しめる）
+
+            for res in self.results:
+                h_num = res["horse"]["number"]
+                idx   = next(i for i,h in enumerate(self.horses) if h["number"]==h_num)
+                base_speed = (0.0015 + res["norm"] * 0.0008) * dist_factor
+                rand_spd   = random.uniform(0.9, 1.1)
+                self.horse_pos[idx] = min(1.0, self.horse_pos[idx] + base_speed * rand_spd)
+
+            # 全馬ゴールしたら次フェーズ
+            if all(p >= 1.0 for p in self.horse_pos):
+                self._start_goal()
+
+        elif self.phase == "goal":
+            self.finish_flash = 1.5
+            if self.phase_t >= 4.0:
+                self.phase          = "result"
+                self.phase_t        = 0.0
+                self.result_timer   = 0.0
+                self._transitioning = False
+
+        elif self.phase == "result":
+            if self.auto_next_sec > 0:
+                self.result_timer += dt
+                if self.result_timer >= self.auto_next_sec:
+                    self._next_race_or_end()
+
+    # ── フェーズ遷移 ─────────────────────────
+    def _end_vote(self):
+        self.phase      = "gate"
+        self.phase_t    = 0.0
+        self.vote_timer = 0.0
+        # 投票結果に基づき馬の調子を微調整
+        if self.votes:
+            top_num = max(self.votes, key=lambda k: self.votes[k])
+            for h in self.horses:
+                if h["number"] == top_num:
+                    h["cond_mult"] = min(h["cond_mult"] * 1.05, 1.3)
+
+    def _start_race(self):
+        self.phase      = "race"
+        self.phase_t    = 0.0
+        self.results    = run_race(self.horses, self.race["surface"], self.race["distance"])
+        self.horse_pos  = [0.0] * len(self.horses)
+
+    def _start_goal(self):
+        self.phase        = "goal"
+        self.phase_t      = 0.0
+        self.finish_flash = 2.0
+        # 的中を累積成績に反映
+        if self.results:
+            winner_num = self.results[0]["horse"]["number"]
+            for username, voted_num in self.voters.items():
+                if username not in self.cumulative:
+                    self.cumulative[username] = {"votes": 0, "hits": 0}
+                if voted_num == winner_num:
+                    self.cumulative[username]["hits"] += 1
+
+    # ── 入力 ─────────────────────────────────
+    def _on_space(self, ev):
+        if self.phase == "vote":
+            self._end_vote()
+
+    def _on_canvas_click(self, ev):
+        # メニューボタン（全フェーズ共通）
+        bx = self.win_w - 116
+        if bx <= ev.x <= bx+108 and 6 <= ev.y <= 36:
+            self._go_menu()
+            return
+        # 最終結果画面ボタン
+        if self.phase == "final" and self._final_btn:
+            bx, by = self._final_btn
+            if bx <= ev.x <= bx+130 and by <= ev.y <= by+38:
+                self._go_menu()
+                return
+        # 結果画面ボタン
+        if self.phase == "result" and self._result_btn:
+            bx1, by, bx2 = self._result_btn
+            if bx1 <= ev.x <= bx1+130 and by <= ev.y <= by+38:
+                self._go_menu()
+                return
+            if bx2 <= ev.x <= bx2+150 and by <= ev.y <= by+38:
+                self._next_race_or_end()
+                return
+        # 投票フェーズ中: 馬リストをクリックで投票
+        if self.phase == "vote":
+            for num, x1, y1, x2, y2 in self._vote_rects:
+                if x1 <= ev.x <= x2 and y1 <= ev.y <= y2:
+                    self._do_vote("[配信者]", num)
+                    return
+        # 結果画面は _draw_result 内で bind するため不要
+
+    def _on_canvas_motion(self, ev):
+        if self.phase != "vote":
+            self.hover_horse = None
+            return
+        for num, x1, y1, x2, y2 in self._vote_rects:
+            if x1 <= ev.x <= x2 and y1 <= ev.y <= y2:
+                self.hover_horse = num
+                return
+        self.hover_horse = None
+
+    def _do_vote(self, username, num):
+        """投票処理（チャット・クリック共通）"""
+        if username not in self.voters:
+            self.voters[username] = num
+            self.votes[num] = self.votes.get(num, 0) + 1
+            # 累積成績に投票を記録
+            if username not in self.cumulative:
+                self.cumulative[username] = {"votes": 0, "hits": 0}
+            self.cumulative[username]["votes"] += 1
+            if username == "[配信者]":
+                self.my_vote = num
+            else:
+                self.danmaku.append(
+                    DanmakuMsg(self.canvas, username, f"→ {num}番", self.win_w))
+
+    def _on_cmd(self, username, col, row, is_flag):
+        # コマンド形式（A1等）は無視、チャットで数字投票
+        pass
+
+    def _on_chat(self, username, text):
+        text = text.strip()
+        if self.phase == "vote" and text.isdigit():
+            num = int(text)
+            if 1 <= num <= len(self.horses):
+                self._do_vote(username, num)
+                return
+        self.danmaku.append(DanmakuMsg(self.canvas, username, text, self.win_w))
+
+    def _go_menu(self):
+        self._running = False
+        self.twitch.stop()
+        for d in self.danmaku:
+            try:
+                self.canvas.delete(d.text_id)
+                self.canvas.delete(d.shadow_id)
+            except Exception:
+                pass
+        self.on_menu()
+
+    # ── 描画 ─────────────────────────────────
+    def _draw(self):
+        self.canvas.delete("hr_bg","hr_header","hr_main","hr_overlay")
+        # 背景
+        self.canvas.create_rectangle(0,0,self.win_w,self.win_h,
+            fill=BG, outline="", tags="hr_bg")
+
+        if self.phase == "vote":
+            self._draw_vote()
+        elif self.phase == "gate":
+            self._draw_gate()
+        elif self.phase == "race":
+            self._draw_race()
+        elif self.phase == "goal":
+            self._draw_race()
+            self._draw_goal_overlay()
+        elif self.phase == "result":
+            self._draw_result()
+        elif self.phase == "final":
+            self._draw_final()
+
+        # 弾幕
+        for d in self.danmaku:
+            self.canvas.tag_raise(d.shadow_id)
+            self.canvas.tag_raise(d.text_id)
+
+    def _draw_header(self, tag="hr_header"):
+        c = self.canvas
+        c.create_rectangle(0,0,self.win_w,70,
+            fill=HEADER_BG, outline="", tags=tag)
+        c.create_text(self.win_w//2, 20,
+            text=f"🏇 {self.race['name']}",
+            fill=ACCENT_COL, font=("Courier",16,"bold"), tags=tag)
+        surface  = self.race["surface"]
+        distance = self.race["distance"]
+        surf_col = "#50E080" if surface == "芝" else "#C8A050"  # 芝=緑、ダート=茶
+        dist_col = "#64C8FF" if distance <= 1400 else ("#FFFFFF" if distance <= 2000 else "#FFB060")
+        # 芝/ダートと距離を別々に色付け
+        cx_surf = self.win_w//2 - 40
+        cx_dist = self.win_w//2 + 30
+        c.create_text(cx_surf, 48,
+            text=surface,
+            fill=surf_col, font=("Courier",13,"bold"), tags=tag)
+        c.create_text(cx_dist, 48,
+            text=f"{distance}m",
+            fill=dist_col, font=("Courier",13,"bold"), tags=tag)
+        # メニューボタン
+        bx = self.win_w - 116
+        c.create_rectangle(bx,6,bx+108,36,
+            fill=BTN_MENU, outline=CELL_BORDER, tags=tag)
+        c.create_text(bx+54,21, text="◀ メニュー",
+            fill=TEXT_W, font=("Courier",11,"bold"), tags=tag)
+        self.canvas.tag_bind(tag, "<Button-1>", self._check_menu_click)
+
+    def _check_menu_click(self, ev):
+        bx = self.win_w - 116
+        if bx <= ev.x <= bx+108 and 6 <= ev.y <= 36:
+            self._go_menu()
+
+    def _draw_vote(self):
+        c = self.canvas
+        tag = "hr_main"
+        self._draw_header()
+
+        # 左パネル: 馬情報
+        panel_h = self.win_h - 70
+        c.create_rectangle(0,70,HR_INFO_W,self.win_h,
+            fill=SIDEBAR_BG, outline="", tags=tag)
+        c.create_line(HR_INFO_W,70,HR_INFO_W,self.win_h,
+            fill=CELL_BORDER, width=1, tags=tag)
+
+        y = 82
+        c.create_text(HR_INFO_W//2, y, text="出走馬一覧",
+            fill=ACCENT_COL, font=("Courier",13,"bold"), tags=tag)
+        y += 24
+
+        row_h = (self.win_h - y - 60) // len(self.horses)
+        row_h = min(row_h, 72)
+
+        self._vote_rects = []
+        for i, h in enumerate(self.horses):
+            ry  = y + i * row_h
+            col = HR_COLORS[i % len(HR_COLORS)]
+            votes_n  = self.votes.get(h["number"], 0)
+            is_hover = (self.hover_horse == h["number"])
+            is_voted = (self.my_vote == h["number"])
+
+            # クリック領域を記録
+            self._vote_rects.append((h["number"], 4, ry, HR_INFO_W-4, ry+row_h-2))
+
+            # 行背景（ホバー・投票済みで色変え）
+            if is_voted:
+                bg_col  = "#1A3A2A"
+                outline = SAFE_COL
+            elif is_hover:
+                bg_col  = BTN_DARK_H
+                outline = ACCENT_COL
+            else:
+                bg_col  = BTN_DARK
+                outline = CELL_BORDER
+            c.create_rectangle(4, ry, HR_INFO_W-4, ry+row_h-2,
+                fill=bg_col, outline=outline, tags=tag)
+            # 馬番カラーバー
+            c.create_rectangle(4, ry, 18, ry+row_h-2,
+                fill=col, outline="", tags=tag)
+            # 馬名・番号
+            c.create_text(26, ry+8,
+                text=f"{h['number']}番 {h['name']}",
+                fill=TEXT_W, anchor="nw", font=("Courier",11,"bold"), tags=tag)
+            # ステータス
+            stars_spd = "★"*h["speed"]  + "☆"*(5-h["speed"])
+            stars_stm = "★"*h["stamina"]+ "☆"*(5-h["stamina"])
+            c.create_text(26, ry+26,
+                text=f"速{stars_spd} 耐{stars_stm} 調{h['condition']}",
+                fill=TEXT_G, anchor="nw", font=("Courier",9), tags=tag)
+            # 一言評価
+            comment = h.get("comment","")[:28]
+            c.create_text(26, ry+42,
+                text=comment,
+                fill=FLAG_COL, anchor="nw", font=("Courier",8), tags=tag)
+            # 投票済みマーク or クリックヒント
+            if is_voted:
+                c.create_text(HR_INFO_W-10, ry+row_h//2,
+                    text="✅ 投票済",
+                    fill=SAFE_COL, anchor="e", font=("Courier",10,"bold"), tags=tag)
+            else:
+                c.create_text(HR_INFO_W-10, ry+row_h//2,
+                    text=f"{votes_n}票" + (" ←Click" if is_hover else ""),
+                    fill=SAFE_COL if votes_n>0 else TEXT_G,
+                    anchor="e", font=("Courier",10,"bold"), tags=tag)
+
+        # 右パネル: 投票状況
+        rx = HR_INFO_W + 20
+        c.create_text(rx, 90, text="📊 投票状況",
+            fill=ACCENT_COL, anchor="nw", font=("Courier",14,"bold"), tags=tag)
+
+        total_votes = sum(self.votes.values()) or 1
+        bar_max_w   = self.win_w - HR_INFO_W - 40
+        by = 126
+        for h in self.horses:
+            num   = h["number"]
+            cnt   = self.votes.get(num, 0)
+            pct   = cnt / total_votes
+            col   = HR_COLORS[(num-1) % len(HR_COLORS)]
+            bar_w = int(bar_max_w * pct)
+
+            c.create_text(rx, by, text=f"{num}番 {h['name'][:8]}",
+                fill=TEXT_W, anchor="nw", font=("Courier",10), tags=tag)
+            c.create_rectangle(rx, by+16, rx+bar_max_w, by+28,
+                fill=CELL_HID, outline="", tags=tag)
+            if bar_w > 0:
+                c.create_rectangle(rx, by+16, rx+bar_w, by+28,
+                    fill=col, outline="", tags=tag)
+            c.create_text(rx+bar_max_w+6, by+22,
+                text=f"{cnt}票 ({pct*100:.0f}%)",
+                fill=TEXT_G, anchor="w", font=("Courier",9), tags=tag)
+            by += 42
+
+        # タイマー
+        ratio = max(0, self.vote_timer / self.vote_sec)
+        bar_col = SAFE_COL if ratio > 0.4 else FLAG_COL if ratio > 0.15 else MINE_COL
+        tw = self.win_w - HR_INFO_W - 40
+        ty = self.win_h - 50
+        c.create_rectangle(rx, ty, rx+tw, ty+14,
+            fill=CELL_HID, outline="", tags=tag)
+        if ratio > 0:
+            c.create_rectangle(rx, ty, rx+int(tw*ratio), ty+14,
+                fill=bar_col, outline="", tags=tag)
+        c.create_text(self.win_w//2, ty-16,
+            text=f"投票受付中  残り {max(0,self.vote_timer):.0f}秒  [Spaceで締切]",
+            fill=bar_col, font=("Courier",12,"bold"), tags=tag)
+
+    def _draw_gate(self):
+        c = self.canvas
+        tag = "hr_main"
+        self._draw_header()
+
+        cy = self.win_h // 2
+        c.create_text(self.win_w//2, cy - 60,
+            text="🏇 出走準備",
+            fill=ACCENT_COL, font=("Courier",24,"bold"), tags=tag)
+
+        # ゲート描画
+        gate_x  = self.win_w // 2 - 200
+        lane_h  = 44
+        n       = len(self.horses)
+        total_h = n * lane_h
+        start_y = cy - total_h // 2
+
+        # ゲートオープン演出（phase_t > 1.5 で開く）
+        opened = self.phase_t > 1.5
+
+        for i, h in enumerate(self.horses):
+            ry  = start_y + i * lane_h
+            col = HR_COLORS[(h['number']-1) % len(HR_COLORS)]
+
+            # レーン背景
+            c.create_rectangle(gate_x-10, ry, self.win_w-40, ry+lane_h-2,
+                fill=CELL_HID if not opened else "#1A2A1A",
+                outline=CELL_BORDER, tags=tag)
+
+            # 馬番
+            c.create_text(gate_x, ry+lane_h//2,
+                text=f"{h['number']}", fill=col,
+                font=("Courier",14,"bold"), tags=tag)
+
+            # 馬（ゲート前に待機）
+            hx = gate_x + 60 if not opened else gate_x + 60 + int(self.phase_t * 80)
+            self.renderers[i].clear(c)
+            self.renderers[i].draw(c, hx, ry+lane_h//2, col,
+                                   frame=self.anim_frame if opened else 0,
+                                   scale=0.7)
+
+            # 馬名
+            c.create_text(gate_x - 80, ry+lane_h//2,
+                text=h["name"][:8], fill=TEXT_W,
+                anchor="e", font=("Courier",10), tags=tag)
+
+            # ゲートバー（開く演出）
+            if not opened:
+                c.create_rectangle(gate_x+40, ry, gate_x+46, ry+lane_h-2,
+                    fill="#888888", outline="", tags=tag)
+
+        if opened:
+            c.create_text(self.win_w//2, cy + total_h//2 + 30,
+                text="ゲートオープン！",
+                fill=FLAG_COL, font=("Courier",20,"bold"), tags=tag)
+
+    def _draw_race(self):
+        c = self.canvas
+        tag = "hr_main"
+        self._draw_header()
+
+        # コース背景
+        track_y = 80
+        track_h = self.win_h - track_y - 60
+        surface = self.race["surface"]
+        track_col = "#2A4A1A" if surface == "芝" else "#4A3010"
+        c.create_rectangle(0, track_y, self.win_w, track_y+track_h,
+            fill=track_col, outline="", tags=tag)
+
+        # レーン
+        n        = len(self.horses)
+        lane_h   = track_h // n
+        label_w  = 130  # 番号＋馬名エリア幅
+        run_x    = label_w   # 走行エリア開始x
+        run_w    = self.win_w - run_x - 40  # 走行エリア幅
+
+        # ラベル背景（走行エリアと分離）
+        c.create_rectangle(0, track_y, label_w, track_y+track_h,
+            fill="#0D1A0D" if surface=="芝" else "#1A0D00",
+            outline="", tags=tag)
+        c.create_line(label_w, track_y, label_w, track_y+track_h,
+            fill="#2A4A2A" if surface=="芝" else "#4A2A00",
+            width=1, tags=tag)
+
+        # ゴールライン
+        gx = run_x + run_w
+        c.create_line(gx, track_y, gx, track_y+track_h,
+            fill="#FFFFFF", width=3, dash=(8,4), tags=tag)
+        c.create_text(gx, track_y-10, text="GOAL",
+            fill="#FFFFFF", font=("Courier",11,"bold"), tags=tag)
+
+        for i, h in enumerate(self.horses):
+            ry  = track_y + i * lane_h
+            col = HR_COLORS[(h["number"]-1) % len(HR_COLORS)]
+            pos = self.horse_pos[i] if self.horse_pos else 0.0
+
+            # レーン区切り
+            c.create_line(0, ry, self.win_w, ry,
+                fill="#1A3A0A" if surface=="芝" else "#2A1A00",
+                width=1, tags=tag)
+
+            # 番号＋馬名（左ラベルエリア内）
+            c.create_text(8, ry+lane_h//2,
+                text=f"{h['number']}", fill=col,
+                anchor="w", font=("Courier",12,"bold"), tags=tag)
+            c.create_text(28, ry+lane_h//2,
+                text=h["name"][:7], fill=TEXT_W,
+                anchor="w", font=("Courier",10), tags=tag)
+
+            # 馬の位置（走行エリア内のみ）
+            hx = run_x + int(run_w * min(pos, 1.0))
+            self.renderers[i].clear(c)
+            self.renderers[i].draw(c, hx, ry+lane_h//2, col,
+                                   frame=self.anim_frame, scale=0.65)
+
+        # 距離表示
+        surf_col2 = "#50E080" if surface == "芝" else "#C8A050"
+        dist      = self.race["distance"]
+        dist_col2 = "#64C8FF" if dist <= 1400 else ("#FFFFFF" if dist <= 2000 else "#FFB060")
+        dist_label = "短距離" if dist<=1400 else ("マイル" if dist<=1800 else
+                     ("中距離" if dist<=2200 else ("中長距離" if dist<=2800 else "長距離")))
+        c.create_text(self.win_w//2 - 50, self.win_h-30,
+            text=surface,
+            fill=surf_col2, font=("Courier",11,"bold"), tags=tag)
+        c.create_text(self.win_w//2 + 10, self.win_h-30,
+            text=f"{dist}m",
+            fill=dist_col2, font=("Courier",11,"bold"), tags=tag)
+        c.create_text(self.win_w//2 + 80, self.win_h-30,
+            text=f"({dist_label})",
+            fill=TEXT_G, font=("Courier",10), tags=tag)
+
+    def _draw_goal_overlay(self):
+        c = self.canvas
+        tag = "hr_overlay"
+        if not self.results:
+            return
+        winner = next((r for r in self.results if r["rank"]==1), None)
+        if not winner:
+            return
+
+        # フラッシュ
+        if self.finish_flash > 0:
+            alpha_stip = "gray75" if self.finish_flash > 1.0 else "gray50"
+            c.create_rectangle(0,0,self.win_w,self.win_h,
+                fill=FLAG_COL, outline="", stipple=alpha_stip, tags=tag)
+
+        cx = self.win_w // 2
+        cy = self.win_h // 2
+        c.create_rectangle(cx-260,cy-60,cx+260,cy+60,
+            fill=BG, outline=FLAG_COL, width=3, tags=tag)
+        col = HR_COLORS[(winner["horse"]["number"]-1) % len(HR_COLORS)]
+        c.create_text(cx, cy-20,
+            text=f"🏆 {winner['horse']['number']}番  {winner['horse']['name']}",
+            fill=col, font=("Courier",22,"bold"), tags=tag)
+        c.create_text(cx, cy+20,
+            text="ゴール！",
+            fill=FLAG_COL, font=("Courier",16,"bold"), tags=tag)
+
+    def _draw_result(self):
+        c = self.canvas
+        tag = "hr_main"
+        self._draw_header()
+
+        if not self.results:
+            return
+
+        cx   = self.win_w // 2
+        # 投票者を馬番ごとに整理
+        voters_by_horse = {}
+        for username, num in self.voters.items():
+            voters_by_horse.setdefault(num, []).append(username)
+        winner_num = self.results[0]["horse"]["number"]
+
+        c.create_text(cx, 90, text="🏆 レース結果",
+            fill=ACCENT_COL, font=("Courier",18,"bold"), tags=tag)
+
+        # ── 左カラム: 順位表 ──
+        lx   = 20
+        row_h = min(48, (self.win_h - 200) // len(self.results))
+        sy   = 120
+        medals = ["🥇","🥈","🥉"] + [f"{r}位" for r in range(4,9)]
+
+        for res in self.results:
+            rank = res["rank"]
+            h    = res["horse"]
+            col  = HR_COLORS[(h["number"]-1) % len(HR_COLORS)]
+            ry   = sy + (rank-1)*row_h
+            rank_col = FLAG_COL if rank==1 else (ACCENT_COL if rank==2
+                       else (SAFE_COL if rank==3 else TEXT_G))
+
+            # 行背景（1〜3位は強調）
+            if rank <= 3:
+                c.create_rectangle(lx, ry, lx+560, ry+row_h-2,
+                    fill=BTN_DARK, outline=rank_col, width=1, tags=tag)
+
+            c.create_text(lx+4, ry+row_h//2,
+                text=medals[rank-1], fill=rank_col, anchor="w",
+                font=("Courier",13,"bold"), tags=tag)
+            c.create_rectangle(lx+44, ry+4, lx+54, ry+row_h-4,
+                fill=col, outline="", tags=tag)
+            c.create_text(lx+60, ry+row_h//2,
+                text=f"{h['number']}番 {h['name']}",
+                fill=TEXT_W, anchor="w",
+                font=("Courier",12,"bold" if rank<=3 else "normal"), tags=tag)
+            c.create_text(lx+240, ry+row_h//2,
+                text=f"調{h['condition']}",
+                fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
+
+            # 投票者一覧（この馬に投票した人）
+            vlist = voters_by_horse.get(h["number"], [])
+            if vlist:
+                # 画面幅に収まる文字数を計算（1文字≒7px想定）
+                max_chars = (self.win_w - lx - 290) // 7
+                joined = "  ".join(vlist)
+                if len(joined) > max_chars:
+                    # 収まる人数を探す
+                    shown = []
+                    used  = 0
+                    for v in vlist:
+                        if used + len(v) + 2 + 4 > max_chars:
+                            break
+                        shown.append(v)
+                        used += len(v) + 2
+                    display = "  ".join(shown) + f"  他{len(vlist)-len(shown)}人"
+                else:
+                    display = joined
+                txt_col = SAFE_COL if h["number"] == winner_num else TEXT_G
+                c.create_text(lx+290, ry+row_h//2,
+                    text=display,
+                    fill=txt_col, anchor="w",
+                    font=("Courier",9), tags=tag)
+
+        # ── 的中サマリー + 累積ランキング ──
+        total   = len(self.voters)
+        winners = voters_by_horse.get(winner_num, [])
+        wy      = sy + len(self.results)*row_h + 14
+        c.create_text(cx, wy,
+            text=f"このレース: 投票者 {total}人  /  的中 {len(winners)}人",
+            fill=TEXT_G, font=("Courier",11), tags=tag)
+
+        # ── ボタン＋自動遷移カウントダウン（位置を先に確定）──
+        by  = self.win_h - 56
+        bx1 = cx - 160
+        bx2 = cx + 20
+
+        # 累積ランキング（ボタンエリアの上に収める）
+        if self.current_race >= 2 and self.cumulative:
+            rank_bottom = by - 52   # カウントダウン・進捗の分を確保
+            ry2 = wy + 26
+            if ry2 + 20 < rank_bottom:
+                c.create_text(cx, ry2,
+                    text=f"── 累積的中ランキング (全{self.current_race}レース) ──",
+                    fill=ACCENT_COL, font=("Courier",11,"bold"), tags=tag)
+                ry2 += 20
+                ranked   = sorted(self.cumulative.items(),
+                                  key=lambda x: (-x[1]["hits"], -x[1]["votes"]))
+                medals_r = ["🥇","🥈","🥉"] + ["  " for _ in range(20)]
+                for ri, (uname, stat) in enumerate(ranked):
+                    if ry2 + 18 > rank_bottom:
+                        remaining = len(ranked) - ri
+                        if remaining > 0:
+                            c.create_text(cx, ry2,
+                                text=f"他{remaining}人...",
+                                fill=TEXT_G, font=("Courier",9), tags=tag)
+                        break
+                    medal = medals_r[ri]
+                    hits  = stat["hits"]
+                    votes = stat["votes"]
+                    col_u = FLAG_COL if ri==0 else (ACCENT_COL if ri==1 else
+                            (SAFE_COL if ri==2 else TEXT_W))
+                    c.create_text(cx - 160, ry2,
+                        text=f"{medal} {uname[:14]}",
+                        fill=col_u, anchor="w", font=("Courier",10,"bold"), tags=tag)
+                    c.create_text(cx + 100, ry2,
+                        text=f"{hits}/{votes}票的中",
+                        fill=col_u, anchor="w", font=("Courier",10), tags=tag)
+                    ry2 += 18
+        c.create_rectangle(bx1, by, bx1+130, by+38,
+            fill=BTN_MENU, outline=CELL_BORDER, tags=tag)
+        c.create_text(bx1+65, by+19, text="◀ メニュー",
+            fill=TEXT_W, font=("Courier",11,"bold"), tags=tag)
+        # レース数の残り表示とボタンラベル切り替え
+        is_last = (self.race_count > 0 and self.current_race >= self.race_count)
+        next_label = "🏆 最終結果へ" if is_last else "🔄 次のレース"
+        next_col   = FLAG_COL if is_last else SAFE_COL
+        c.create_rectangle(bx2, by, bx2+150, by+38,
+            fill=next_col, outline="", tags=tag)
+        c.create_text(bx2+75, by+19, text=next_label,
+            fill=BG, font=("Courier",11,"bold"), tags=tag)
+        # レース進捗
+        if self.race_count > 0:
+            progress = f"レース {self.current_race} / {self.race_count}"
+        else:
+            progress = f"レース {self.current_race} / ∞"
+        c.create_text(cx, by-42,
+            text=progress,
+            fill=ACCENT_COL, font=("Courier",12,"bold"), tags=tag)
+
+        # 自動遷移カウントダウン
+        if self.auto_next_sec > 0:
+            remain = max(0, self.auto_next_sec - self.result_timer)
+            c.create_text(cx, by-20,
+                text=f"{remain:.0f}秒後に自動で次のレースへ",
+                fill=FLAG_COL, font=("Courier",11), tags=tag)
+
+        # ボタン座標を保存してon_canvas_clickから使う
+        self._result_btn = (bx1, by, bx2)
+
+    def _draw_final(self):
+        """全レース終了後の最終ランキング画面"""
+        c   = self.canvas
+        tag = "hr_main"
+        c.create_rectangle(0,0,self.win_w,self.win_h, fill=BG, outline="", tags=tag)
+
+        cx = self.win_w // 2
+        c.create_text(cx, 50,
+            text=f"🏆 全{self.race_count}レース 最終ランキング",
+            fill=FLAG_COL, font=("Courier",20,"bold"), tags=tag)
+
+        if not self.cumulative:
+            c.create_text(cx, self.win_h//2,
+                text="投票者がいませんでした",
+                fill=TEXT_G, font=("Courier",14), tags=tag)
+        else:
+            ranked = sorted(self.cumulative.items(),
+                            key=lambda x: (-x[1]["hits"], -x[1]["votes"]))
+            medals_f = ["🥇","🥈","🥉"] + [f"{i}位" for i in range(4, 50)]
+            row_h_f  = min(54, (self.win_h - 160) // max(len(ranked), 1))
+            sy       = 100
+
+            for ri, (uname, stat) in enumerate(ranked):
+                ry     = sy + ri * row_h_f
+                if ry + row_h_f > self.win_h - 80:
+                    remaining = len(ranked) - ri
+                    c.create_text(cx, ry,
+                        text=f"他{remaining}人...",
+                        fill=TEXT_G, font=("Courier",11), tags=tag)
+                    break
+                medal  = medals_f[ri]
+                hits   = stat["hits"]
+                votes  = stat["votes"]
+                pct    = int(hits/votes*100) if votes else 0
+                col_u  = FLAG_COL if ri==0 else (ACCENT_COL if ri==1 else
+                         (SAFE_COL if ri==2 else TEXT_W))
+
+                if ri < 3:
+                    c.create_rectangle(cx-280, ry, cx+280, ry+row_h_f-2,
+                        fill=BTN_DARK, outline=col_u, tags=tag)
+
+                c.create_text(cx-270, ry+row_h_f//2,
+                    text=medal, fill=col_u, anchor="w",
+                    font=("Courier",14,"bold"), tags=tag)
+                c.create_text(cx-220, ry+row_h_f//2,
+                    text=uname[:16], fill=col_u, anchor="w",
+                    font=("Courier",13,"bold" if ri<3 else "normal"), tags=tag)
+                c.create_text(cx+80, ry+row_h_f//2,
+                    text=f"{hits} / {votes}票",
+                    fill=col_u, anchor="w", font=("Courier",12), tags=tag)
+                c.create_text(cx+200, ry+row_h_f//2,
+                    text=f"({pct}%)",
+                    fill=TEXT_G, anchor="w", font=("Courier",11), tags=tag)
+
+        # メニューボタン
+        by = self.win_h - 56
+        bx = cx - 65
+        c.create_rectangle(bx, by, bx+130, by+38,
+            fill=SAFE_COL, outline="", tags=tag)
+        c.create_text(bx+65, by+19, text="◀ メニューへ",
+            fill=BG, font=("Courier",12,"bold"), tags=tag)
+
+        self._final_btn = (bx, by)
+
+    def _next_race_or_end(self):
+        """次のレースへ、またはレース数に達したら最終結果へ"""
+        if self._transitioning:   # 2重呼び出し防止
+            return
+        self._transitioning = True
+        if self.race_count > 0 and self.current_race >= self.race_count:
+            self.phase        = "final"
+            self.phase_t      = 0.0
+            self._final_btn   = None
+        else:
+            self._next_race()
+
+    def _next_race(self):
+        self._transitioning = False
+        self._result_btn  = None
+        self.current_race += 1
+        self.race         = generate_race(num_horses=8)
+        self.horses       = self.race["horses"]
+        self.results      = None
+        self.votes        = {}
+        self.voters       = {}
+        self.vote_timer   = float(self.vote_sec)
+        self.horse_pos    = []
+        self.phase        = "vote"
+        self.phase_t      = 0.0
+        self.finish_flash = 0.0
+        self.result_timer = 0.0
+        self.my_vote      = None
+        self.hover_horse  = None
+        self._vote_rects  = []
 class App:
     def __init__(self):
         self.root = tk.Tk()
         self.cfg  = load_config()
         apply_theme(self.cfg.get("theme", "NightBlue"))
         _apply_icon(self.root)
+        # ウィンドウサイズを設定から読み込み、起動時に一度だけ固定
+        res_name = self.cfg.get("resolution", DEFAULT_RES)
+        win_w, win_h = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
+        self.root.geometry(f"{win_w}x{win_h}")
+        self.root.resizable(False, False)
         self._show_top_menu()
         self.root.mainloop()
 
@@ -1612,6 +2681,8 @@ class App:
             self._show_ms_lobby()
         elif game_id == "reversi":
             self._show_reversi_lobby()
+        elif game_id == "horserace":
+            self._show_horse_lobby()
 
     def _show_ms_lobby(self):
         self._clear()
@@ -1637,10 +2708,26 @@ class App:
         ReversiGameScreen(self.root, cfg, max_vote_sec, tiebreak,
                           on_menu=self._show_top_menu)
 
+    def _show_horse_lobby(self):
+        self._clear()
+        HorseLobby(self.root, self.cfg,
+                   on_start=self._start_horse,
+                   on_back=self._show_top_menu)
+
+    def _start_horse(self, cfg, vote_sec, race_count=0):
+        self.cfg = cfg
+        self._clear()
+        HorseRaceScreen(self.root, cfg, vote_sec, race_count,
+                        on_menu=self._show_top_menu)
+
 
 if __name__ == "__main__":
     App()
 
 # ══════════════════════════════════════════════
 #  リバーシ ロビー画面
+# ══════════════════════════════════════════════
+
+# ══════════════════════════════════════════════
+#  競馬 ロビー画面
 # ══════════════════════════════════════════════
