@@ -17,12 +17,15 @@ import threading
 import asyncio
 import time
 import random
+import math
 
 from config import load_config, save_config
 from minesweeper import Minesweeper
 from twitch_client import TwitchClient
 from reversi import Reversi, BLACK, WHITE, EMPTY
-from horserace import generate_race, run_race, IconHorseRenderer
+from horserace import (generate_race, run_race, IconHorseRenderer,
+                        ImageHorseRenderer, calc_odds,
+                        load_horse_sprites, load_gate_image)
 
 # ══════════════════════════════════════════════
 #  定数
@@ -136,6 +139,27 @@ MINE_COL=FLAG_COL=SAFE_COL=ACCENT_COL=TEXT_W=TEXT_G=BOOM_BG=""
 BTN_DARK=BTN_DARK_H=BTN_MENU=BTN_MENU_H=DISABLED_BG=DISABLED_FG=""
 NUM_COLORS=[]; DANMAKU_COLORS=[]
 apply_theme("NightBlue")
+
+HR_COLORS = [
+    "#DDDDDD","#888888","#FF4466","#4488FF",
+    "#FFCC00","#44DD88","#FF8800","#FF66AA",
+]
+HR_LANE_H  = 68   # 1レーンの高さ
+HR_HORSE_W  = 300  # 左カラム: 馬情報
+HR_JOCKEY_W = 200  # 中カラム: 騎手情報
+HR_INFO_W   = HR_HORSE_W + HR_JOCKEY_W  # 左+中 合計幅
+HR_FPS     = 30
+
+PT_PANEL_W = 130   # ツールパネル幅
+PT_COLORS  = [
+    "#FFFFFF","#CCCCCC","#888888","#000000",
+    "#FF3344","#FF8800","#FFCC00","#44DD44",
+    "#00AAFF","#4444FF","#AA44FF","#FF44AA",
+    "#00DDCC","#884400","#005500","#000044",
+]
+
+
+
 
 # ── 解像度プリセット ────────────────────────────
 RESOLUTIONS = {
@@ -447,6 +471,13 @@ GAME_CATALOG = [
         "desc":    "コメントでレースに投票して参加",
         "ready":   True,
     },
+    {
+        "id":      "paint",
+        "icon":    "🎨",
+        "title":   "ペイント",
+        "desc":    "お絵描き配信  チャットが弾幕で流れる",
+        "ready":   True,
+    },
 ]
 
 class TopMenuScreen:
@@ -480,7 +511,25 @@ class TopMenuScreen:
             status_txt = "⚠ Not set: " + ", ".join(missing) + "  → Settings"
             status_fg  = FLAG_COL
         make_label(root, status_txt, fg=status_fg,
-                   font=("Courier", 10)).pack(pady=(0, 18))
+                   font=("Courier", 10)).pack(pady=(0, 6))
+
+        # オンライン/オフライン トグル
+        self.online_var = tk.BooleanVar(value=cfg.get("online_mode", True))
+        tog_frame = tk.Frame(root, bg=BG)
+        tog_frame.pack(pady=(0, 14))
+        self._online_btn = tk.Button(
+            tog_frame,
+            text=self._online_label(),
+            font=("Courier", 11, "bold"),
+            relief="flat", bd=0, padx=14, pady=4,
+            cursor="hand2",
+            command=self._toggle_online,
+            **self._online_style()
+        )
+        self._online_btn.pack()
+        make_label(tog_frame,
+                   "* Offline: play without Twitch connection",
+                   fg=TEXT_G, font=("Courier", 9)).pack(pady=(3,0))
 
         # ゲームカード一覧
         cards = tk.Frame(root, bg=BG)
@@ -497,6 +546,26 @@ class TopMenuScreen:
         bf.pack(pady=(0, 24))
         make_btn(bf, "⚙  Settings", on_settings,
                  bg=BTN_DARK).pack()
+
+    def _online_label(self):
+        return "🌐 Online" if self.online_var.get() else "📴 Offline"
+
+    def _online_style(self):
+        if self.online_var.get():
+            return {"bg": SAFE_COL, "fg": BG,
+                    "activebackground": "#40CC90", "activeforeground": BG}
+        else:
+            return {"bg": BTN_DARK, "fg": TEXT_G,
+                    "activebackground": BTN_DARK_H, "activeforeground": TEXT_W}
+
+    def _toggle_online(self):
+        self.online_var.set(not self.online_var.get())
+        self.cfg["online_mode"] = self.online_var.get()
+        save_config(self.cfg)
+        self._online_btn.config(
+            text=self._online_label(),
+            **self._online_style()
+        )
 
     def _make_card(self, parent, game):
         ready = game["ready"]
@@ -779,14 +848,16 @@ class GameScreen:
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Button-2>", self._on_right_click)
 
+        self.online_mode = cfg.get("online_mode", True)
         self.twitch = TwitchClient(
             cfg["channel"], cfg["token"],
             on_command=self._on_command,
             on_chat=self._on_chat,
         )
-        threading.Thread(
-            target=lambda: asyncio.run(self.twitch.connect()), daemon=True
-        ).start()
+        if self.online_mode:
+            threading.Thread(
+                target=lambda: asyncio.run(self.twitch.connect()), daemon=True
+            ).start()
 
         self._loop()
 
@@ -1231,6 +1302,42 @@ class ReversiLobby:
                            activebackground=BG, activeforeground=ACCENT_COL,
                            font=("Courier",11), anchor="w").pack(fill="x", pady=1)
 
+        # ── 先手/後手選択 ──
+        tk.Frame(frame, bg=CELL_BORDER, height=1).pack(fill="x", pady=(14,12))
+        make_label(frame, "配信者の手番:",
+                   font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(0,4))
+        self.turn_var = tk.StringVar(value=cfg.get("rv_turn","black"))
+        tf2 = tk.Frame(frame, bg=BG)
+        tf2.pack(fill="x")
+        for val, lbl, desc in [("black","⚫ 黒（先手）","配信者が先手"),
+                                ("white","⬜ 白（後手）","チャットが先手")]:
+            row = tk.Frame(tf2, bg=BG)
+            row.pack(fill="x", pady=2)
+            tk.Radiobutton(row, text=lbl, variable=self.turn_var, value=val,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier",12,"bold"), anchor="w").pack(side="left")
+            tk.Label(row, text=f"  {desc}", bg=BG, fg=TEXT_G,
+                     font=("Courier",10)).pack(side="left")
+
+        # ── チャット側自動石配置 ──
+        tk.Frame(frame, bg=CELL_BORDER, height=1).pack(fill="x", pady=(14,12))
+        make_label(frame, "チャット側 時間切れ時の自動配置:",
+                   font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(0,4))
+        self.auto_place_var = tk.BooleanVar(value=cfg.get("rv_auto_place", True))
+        apf = tk.Frame(frame, bg=BG)
+        apf.pack(fill="x")
+        for val, lbl, desc in [(True,"有効","時間切れ時にランダムで合法手に配置"),
+                               (False,"無効","時間切れ時はパスとして扱う")]:
+            row = tk.Frame(apf, bg=BG)
+            row.pack(fill="x", pady=2)
+            tk.Radiobutton(row, text=lbl, variable=self.auto_place_var, value=val,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier",12,"bold"), anchor="w").pack(side="left")
+            tk.Label(row, text=f"  {desc}", bg=BG, fg=TEXT_G,
+                     font=("Courier",10)).pack(side="left")
+
         self.err_var = tk.StringVar()
         tk.Label(frame, textvariable=self.err_var, bg=BG, fg=MINE_COL,
                  font=("Courier",11)).pack(pady=(10,0))
@@ -1244,11 +1351,14 @@ class ReversiLobby:
     def _start(self):
         channel = self.cfg.get("channel","")
         token   = self.cfg.get("token","")
-        if not channel or not token.startswith("oauth:"):
+        online  = self.cfg.get("online_mode", True)
+        if online and (not channel or not token.startswith("oauth:")):
             self.err_var.set("⚠ Settings not configured")
             return
-        self.cfg["rv_vote_sec"]  = self.vote_var.get()
-        self.cfg["rv_tiebreak"]  = self.tie_var.get()
+        self.cfg["rv_vote_sec"]   = self.vote_var.get()
+        self.cfg["rv_tiebreak"]   = self.tie_var.get()
+        self.cfg["rv_turn"]       = self.turn_var.get()
+        self.cfg["rv_auto_place"] = self.auto_place_var.get()
         save_config(self.cfg)
         self.on_start(self.cfg, self.vote_var.get(), self.tie_var.get())
 
@@ -1296,6 +1406,16 @@ class ReversiGameScreen:
         self.canvas.pack()
 
         self.rv          = Reversi()
+        # 先手/後手設定（black=配信者先手, white=配信者後手）
+        rv_turn = cfg.get("rv_turn", "black")
+        if rv_turn == "white":
+            # 配信者が白 = チャットが黒(先手)
+            self.streamer_color = WHITE
+            self.chat_color     = BLACK
+        else:
+            self.streamer_color = BLACK
+            self.chat_color     = WHITE
+        self.auto_place = cfg.get("rv_auto_place", True)
         self.votes       = {}        # {"A1": count, ...} / tiebreak="first": {"A1": timestamp}
         self.vote_order  = []        # 早着順用: [(col,row), ...]
         self.vote_timer  = 0.0      # チャットターン残り秒数
@@ -1309,15 +1429,17 @@ class ReversiGameScreen:
 
         self.hint_text = f"Reversi: A1=vote  (ch: {cfg['channel']})"
 
-        # Twitch接続
+        # Twitch接続（オフラインモード時は接続しない）
+        self.online_mode = cfg.get("online_mode", True)
         self.twitch = TwitchClient(
             cfg["channel"], cfg["token"],
             on_command=self._on_vote,
             on_chat=self._on_chat,
         )
-        threading.Thread(
-            target=lambda: asyncio.run(self.twitch.connect()), daemon=True
-        ).start()
+        if self.online_mode:
+            threading.Thread(
+                target=lambda: asyncio.run(self.twitch.connect()), daemon=True
+            ).start()
 
         # イベント
         self.canvas.bind("<Motion>",          self._on_motion)
@@ -1331,15 +1453,17 @@ class ReversiGameScreen:
     def _start_turn(self):
         if self.rv.game_over:
             return
-        if self.rv.turn == BLACK:
+        if self.rv.turn == self.streamer_color:
             self.voting    = False
-            self.status_msg = "Your turn — click to place"
+            col_name = "⚫" if self.streamer_color == BLACK else "⬜"
+            self.status_msg = f"{col_name} Your turn — click to place"
         else:
             self.voting    = True
             self.vote_timer = float(self.max_vote_sec)
             self.votes     = {}
             self.vote_order = []
-            self.status_msg = f"Chat voting...  [{self.max_vote_sec}s]  Space = close"
+            col_name = "⬜" if self.chat_color == WHITE else "⚫"
+            self.status_msg = f"{col_name} Chat voting...  [{self.max_vote_sec}s]  Space = close"
 
     # ── メインループ ──────────────────────────
     def _loop(self):
@@ -1370,17 +1494,17 @@ class ReversiGameScreen:
         if not self.voting:
             return
         self.voting = False
-        legal = self.rv.legal_moves(WHITE)
+        legal = self.rv.legal_moves(self.chat_color)
         if not self.votes:
-            # 投票なし → ランダムに合法手から選ぶ
-            if legal:
+            # 投票なし → auto_place設定に従う
+            if self.auto_place and legal:
                 import random as _r
                 row, col = _r.choice(legal)
                 self.rv.place(row, col)
+            # auto_place=False または合法手なし → パス（turn交代はreversi.pyが処理）
         else:
             # 最多得票を選ぶ
             if self.tiebreak == "first":
-                # 早着順: vote_orderから合法手の最初を選ぶ
                 chosen = None
                 for rc in self.vote_order:
                     if rc in legal:
@@ -1389,7 +1513,6 @@ class ReversiGameScreen:
                 if chosen is None and legal:
                     chosen = legal[0]
             else:
-                # ランダム（同票の場合はランダム）
                 max_v = max(self.votes.values())
                 top   = [rc for rc, v in self.votes.items() if v == max_v and rc in legal]
                 if not top:
@@ -1449,7 +1572,7 @@ class ReversiGameScreen:
             self.root.clipboard_append(self.hint_text)
             self.copy_flash = 1.8; return
         # 配信者のターン時のみ盤面クリック有効
-        if self.rv.turn == BLACK and not self.voting and not self.rv.game_over:
+        if self.rv.turn == self.streamer_color and not self.voting and not self.rv.game_over:
             col, row = self._cell_at(ev.x, ev.y)
             if col is not None:
                 if self.rv.place(row, col):
@@ -1566,7 +1689,7 @@ class ReversiGameScreen:
                     fill=cell_fill, outline="#1A4A1A", width=1, tags="rv_board")
 
                 # 合法手ヒント（薄い丸）
-                if is_legal and self.rv.turn == BLACK and not self.voting:
+                if is_legal and self.rv.turn == self.streamer_color and not self.voting:
                     r = cell//6
                     cx2 = x1+cell//2
                     cy2 = y1+cell//2
@@ -1795,7 +1918,8 @@ class HorseLobby:
                  bg=SAFE_COL, fg=BG).pack(side="right")
 
     def _start(self):
-        if not self.cfg.get("channel") or not self.cfg.get("token","").startswith("oauth:"):
+        online = self.cfg.get("online_mode", True)
+        if online and (not self.cfg.get("channel") or not self.cfg.get("token","").startswith("oauth:")):
             self.err_var.set("⚠ Settings not configured")
             return
         self.cfg["hr_vote_sec"]    = self.vote_var.get()
@@ -1810,13 +1934,6 @@ class HorseLobby:
 #  競馬 メイン画面
 #  フェーズ: vote → gate → race → goal → result
 # ══════════════════════════════════════════════
-HR_COLORS = [
-    "#FF4466","#4488FF","#44DD88","#FFCC00",
-    "#FF8800","#AA44FF","#00CCFF","#FF66AA",
-]
-HR_LANE_H  = 68   # 1レーンの高さ
-HR_INFO_W  = 320  # 左側馬情報パネル幅
-HR_FPS     = 30
 
 class HorseRaceScreen:
     PHASES = ["vote", "gate", "race", "goal", "result"]
@@ -1842,11 +1959,15 @@ class HorseRaceScreen:
         self.race    = generate_race(num_horses=8)
         self.horses  = self.race["horses"]
         self.results = None   # run_race後に設定
+        self.odds    = self.race["odds"]   # {horse_number: odds_float}
 
         # 投票
         self.votes      = {}   # {horse_number: count}
         self.vote_timer = float(vote_sec)
         self.voters     = {}   # {username: horse_number} 1人1票
+
+        # ポイントシステム: {username: points}（初期1pt、的中で倍率×1pt獲得）
+        self.points     = {}
 
         # フェーズ管理
         self.phase      = "vote"
@@ -1861,18 +1982,40 @@ class HorseRaceScreen:
         self.finish_flash = 0.0
         self.danmaku      = []
 
-        # 馬描画レンダラー（馬ごとに個別タグ）
-        self.renderers = [IconHorseRenderer(f"horse_{i}") for i in range(len(self.horses))]
+        # 画像ロード（失敗時はIconHorseRendererにフォールバック）
+        import os
+        img_dir = os.path.join(
+            os.path.dirname(sys.executable) if getattr(sys,"frozen",False)
+            else os.path.dirname(os.path.abspath(__file__)),
+            "img"
+        )
+        track_h   = self.win_h - 80 - 60
+        lane_h    = track_h // 8
+        target_h  = int(lane_h * 0.85)
+        self.horse_sprites = load_horse_sprites(img_dir, target_h)
+        self.gate_img      = load_gate_image(img_dir, self.win_w, self.win_h)
+        self.use_images    = self.horse_sprites is not None
 
-        # Twitch
+        # 馬描画レンダラー（馬ごとに個別タグ）
+        if self.use_images:
+            self.renderers = [
+                ImageHorseRenderer(self.horse_sprites, f"horse_{i}")
+                for i in range(len(self.horses))
+            ]
+        else:
+            self.renderers = [IconHorseRenderer(f"horse_{i}") for i in range(len(self.horses))]
+
+        # Twitch（オフライン時は接続しない）
+        self.online_mode = cfg.get("online_mode", True)
         self.twitch = TwitchClient(
             cfg["channel"], cfg["token"],
             on_command=self._on_cmd,
             on_chat=self._on_chat,
         )
-        threading.Thread(
-            target=lambda: asyncio.run(self.twitch.connect()), daemon=True
-        ).start()
+        if self.online_mode:
+            threading.Thread(
+                target=lambda: asyncio.run(self.twitch.connect()), daemon=True
+            ).start()
 
         root.bind("<space>", self._on_space)
         self.canvas.bind("<Button-1>", self._on_canvas_click)
@@ -1885,8 +2028,8 @@ class HorseRaceScreen:
         self._transitioning = False  # 遷移中フラグ（2重防止）
         self.auto_next_sec  = float(cfg.get("hr_auto_next", 0))
         self.result_timer   = 0.0
-        self.current_race   = 1          # 現在のレース番号
-        # 累積成績: {username: {"votes": N, "hits": N}}
+        self.current_race   = 1
+        # 累積成績: {username: {"votes": N, "hits": N, "points": float}}
         self.cumulative     = {}
         self._loop()
 
@@ -1907,6 +2050,16 @@ class HorseRaceScreen:
         if self.finish_flash > 0:
             self.finish_flash = max(0.0, self.finish_flash - dt)
 
+        # ゴール花吹雪パーティクル更新
+        if hasattr(self, "_goal_particles") and self._goal_particles:
+            for p in self._goal_particles:
+                p["x"]  += p["vx"] * dt
+                p["y"]  += p["vy"] * dt
+                p["vy"] += 120 * dt  # 重力
+                if p["y"] > self.win_h + 20:
+                    p["alive"] = False
+            self._goal_particles = [p for p in self._goal_particles if p["alive"]]
+
         self._update_phase(dt)
         self._draw()
         self.root.after(1000 // HR_FPS, self._loop)
@@ -1918,7 +2071,7 @@ class HorseRaceScreen:
                 self._end_vote()
 
         elif self.phase == "gate":
-            if self.phase_t >= 3.0:
+            if self.phase_t >= 4.0:
                 self._start_race()
 
         elif self.phase == "race":
@@ -1942,8 +2095,8 @@ class HorseRaceScreen:
                 rand_spd   = random.uniform(0.9, 1.1)
                 self.horse_pos[idx] = min(1.0, self.horse_pos[idx] + base_speed * rand_spd)
 
-            # 全馬ゴールしたら次フェーズ
-            if all(p >= 1.0 for p in self.horse_pos):
+            # 先頭馬がゴールしたらすぐ演出開始
+            if self.horse_pos and max(self.horse_pos) >= 1.0:
                 self._start_goal()
 
         elif self.phase == "goal":
@@ -1982,14 +2135,93 @@ class HorseRaceScreen:
         self.phase        = "goal"
         self.phase_t      = 0.0
         self.finish_flash = 2.0
-        # 的中を累積成績に反映
+        # ゴール用花吹雪パーティクル（Particleクラスとは別に独自管理）
+        self._goal_particles = []
+        if self.results:
+            winner = next((r for r in self.results if r["rank"]==1), None)
+            if winner:
+                win_col = HR_COLORS[(winner["horse"]["number"]-1) % len(HR_COLORS)]
+                colors  = [win_col, FLAG_COL, "#FFFFFF", ACCENT_COL, SAFE_COL]
+                import random as _r
+                for _ in range(100):
+                    self._goal_particles.append({
+                        "x":     _r.uniform(0, self.win_w),
+                        "y":     _r.uniform(-60, self.win_h * 0.3),
+                        "vx":    _r.uniform(-40, 40),
+                        "vy":    _r.uniform(60, 180),
+                        "color": _r.choice(colors),
+                        "r":     _r.randint(3, 7),
+                        "alive": True,
+                    })
+        # ゴール背景画像ロード（未ロード時）
+        if not hasattr(self, "_goal_bg_img"):
+            self._load_goal_bg()
+
+    def _load_goal_bg(self):
+        """ゴール背景画像（rdesign_19917）と勝ち馬大画像をロード"""
+        import os
+        self._goal_bg_img       = None
+        self._goal_bg_img_small = None
+        self._goal_big_img      = None
+        try:
+            from PIL import Image, ImageTk
+            img_dir = os.path.join(
+                os.path.dirname(sys.executable) if getattr(sys,"frozen",False)
+                else os.path.dirname(os.path.abspath(__file__)), "img")
+            # ゴール背景
+            path = os.path.join(img_dir, "rdesign_19917.png")
+            if os.path.exists(path):
+                img  = Image.open(path).convert("RGBA")
+                full = img.resize((self.win_w, self.win_h), Image.LANCZOS)
+                self._goal_bg_img = ImageTk.PhotoImage(full)
+                gw = int(self.win_h * 0.6)
+                gh = int(self.win_h * 0.6)
+                self._goal_bg_img_small = ImageTk.PhotoImage(img.resize((gw,gh), Image.LANCZOS))
+        except Exception as e:
+            print(f"[GoalBG] {e}")
+
+        # 勝ち馬の大画像を生成
+        if not self.use_images or not self.results:
+            return
+        winner = next((r for r in self.results if r["rank"]==1), None)
+        if not winner:
+            return
+        try:
+            from PIL import Image, ImageTk
+            import numpy as np
+            from horserace import SPRITE_CROPS
+            coat = winner["horse"].get("coat","brown")
+            img_dir = os.path.join(
+                os.path.dirname(sys.executable) if getattr(sys,"frozen",False)
+                else os.path.dirname(os.path.abspath(__file__)), "img")
+            path = os.path.join(img_dir,
+                "rdesign_19914.png" if coat=="brown" else "rdesign_19916.png")
+            x1,y1,x2,y2 = SPRITE_CROPS[winner["horse"]["number"]]
+            sheet = Image.open(path).convert("RGBA")
+            arr   = np.array(sheet)
+            mask  = (arr[:,:,0].astype(int)+arr[:,:,1].astype(int)+arr[:,:,2].astype(int))<=30
+            arr[mask,3] = 0
+            crop = Image.fromarray(arr,"RGBA").crop((x1,y1,x2,y2))
+            crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
+            th   = int(self.win_h * 0.55)
+            tw   = int(crop.width * th / crop.height)
+            crop = crop.resize((tw, th), Image.LANCZOS)
+            self._goal_big_img = ImageTk.PhotoImage(crop)
+        except Exception as e:
+            print(f"[GoalBigImg] {e}")
+        # 的中を累積成績とポイントに反映
         if self.results:
             winner_num = self.results[0]["horse"]["number"]
+            winner_odds = self.odds.get(winner_num, 2.0)
             for username, voted_num in self.voters.items():
                 if username not in self.cumulative:
-                    self.cumulative[username] = {"votes": 0, "hits": 0}
+                    self.cumulative[username] = {"votes": 0, "hits": 0, "points": 1.0}
                 if voted_num == winner_num:
                     self.cumulative[username]["hits"] += 1
+                    # 的中ポイント: オッズ × 1pt（小数点1桁で切り上げ）
+                    gain = round(winner_odds, 1)
+                    self.cumulative[username]["points"] = round(
+                        self.cumulative[username]["points"] + gain, 1)
 
     # ── 入力 ─────────────────────────────────
     def _on_space(self, ev):
@@ -2040,9 +2272,9 @@ class HorseRaceScreen:
         if username not in self.voters:
             self.voters[username] = num
             self.votes[num] = self.votes.get(num, 0) + 1
-            # 累積成績に投票を記録
+            # 累積成績に投票を記録（初回は1pt付与）
             if username not in self.cumulative:
-                self.cumulative[username] = {"votes": 0, "hits": 0}
+                self.cumulative[username] = {"votes": 0, "hits": 0, "points": 1.0}
             self.cumulative[username]["votes"] += 1
             if username == "[配信者]":
                 self.my_vote = num
@@ -2088,8 +2320,7 @@ class HorseRaceScreen:
         elif self.phase == "race":
             self._draw_race()
         elif self.phase == "goal":
-            self._draw_race()
-            self._draw_goal_overlay()
+            self._draw_goal_scene()
         elif self.phase == "result":
             self._draw_result()
         elif self.phase == "final":
@@ -2134,173 +2365,286 @@ class HorseRaceScreen:
             self._go_menu()
 
     def _draw_vote(self):
-        c = self.canvas
+        c   = self.canvas
         tag = "hr_main"
         self._draw_header()
 
-        # 左パネル: 馬情報
-        panel_h = self.win_h - 70
-        c.create_rectangle(0,70,HR_INFO_W,self.win_h,
+        # ── カラム境界 ──
+        jx  = HR_HORSE_W          # 騎手カラム開始x
+        vx  = HR_INFO_W           # 投票状況カラム開始x
+        hdr = 70
+        y0  = hdr + 2
+
+        # 馬情報カラム背景
+        c.create_rectangle(0, hdr, HR_HORSE_W, self.win_h,
             fill=SIDEBAR_BG, outline="", tags=tag)
-        c.create_line(HR_INFO_W,70,HR_INFO_W,self.win_h,
-            fill=CELL_BORDER, width=1, tags=tag)
+        # 騎手カラム背景（少し明るく）
+        c.create_rectangle(HR_HORSE_W, hdr, HR_INFO_W, self.win_h,
+            fill="#13162A", outline="", tags=tag)
+        # カラム区切り線
+        for lx in [HR_HORSE_W, HR_INFO_W]:
+            c.create_line(lx, hdr, lx, self.win_h,
+                fill=CELL_BORDER, width=1, tags=tag)
 
-        y = 82
-        c.create_text(HR_INFO_W//2, y, text="出走馬一覧",
-            fill=ACCENT_COL, font=("Courier",13,"bold"), tags=tag)
-        y += 24
+        # カラムヘッダー
+        c.create_text(HR_HORSE_W//2, y0+8,
+            text="出走馬一覧", fill=ACCENT_COL,
+            font=("Courier",12,"bold"), tags=tag)
+        c.create_text(HR_HORSE_W + HR_JOCKEY_W//2, y0+8,
+            text="騎手情報", fill=ACCENT_COL,
+            font=("Courier",12,"bold"), tags=tag)
+        c.create_text(vx + (self.win_w-vx)//2, y0+8,
+            text="📊 投票状況", fill=ACCENT_COL,
+            font=("Courier",12,"bold"), tags=tag)
 
-        row_h = (self.win_h - y - 60) // len(self.horses)
-        row_h = min(row_h, 72)
+        y   = y0 + 28
+        n   = len(self.horses)
+        row_h = (self.win_h - y - 56) // n
+        row_h = min(row_h, 82)
 
         self._vote_rects = []
         for i, h in enumerate(self.horses):
-            ry  = y + i * row_h
-            col = HR_COLORS[i % len(HR_COLORS)]
+            ry       = y + i * row_h
+            col      = HR_COLORS[(h["number"]-1) % len(HR_COLORS)]
             votes_n  = self.votes.get(h["number"], 0)
             is_hover = (self.hover_horse == h["number"])
             is_voted = (self.my_vote == h["number"])
+            odds_val = self.odds.get(h["number"], 0.0)
+            half     = row_h // 2
 
-            # クリック領域を記録
-            self._vote_rects.append((h["number"], 4, ry, HR_INFO_W-4, ry+row_h-2))
+            # クリック領域（馬カラム全体）
+            self._vote_rects.append((h["number"], 2, ry, HR_HORSE_W-2, ry+row_h-2))
 
-            # 行背景（ホバー・投票済みで色変え）
+            # ── 馬情報カラム背景 ──
             if is_voted:
-                bg_col  = "#1A3A2A"
-                outline = SAFE_COL
+                bg_col = "#1A3A2A"; outline = SAFE_COL
             elif is_hover:
-                bg_col  = BTN_DARK_H
-                outline = ACCENT_COL
+                bg_col = BTN_DARK_H; outline = ACCENT_COL
             else:
-                bg_col  = BTN_DARK
-                outline = CELL_BORDER
-            c.create_rectangle(4, ry, HR_INFO_W-4, ry+row_h-2,
+                bg_col = BTN_DARK; outline = CELL_BORDER
+            c.create_rectangle(2, ry, HR_HORSE_W-2, ry+row_h-2,
                 fill=bg_col, outline=outline, tags=tag)
             # 馬番カラーバー
-            c.create_rectangle(4, ry, 18, ry+row_h-2,
+            c.create_rectangle(2, ry, 14, ry+row_h-2,
                 fill=col, outline="", tags=tag)
-            # 馬名・番号
-            c.create_text(26, ry+8,
-                text=f"{h['number']}番 {h['name']}",
-                fill=TEXT_W, anchor="nw", font=("Courier",11,"bold"), tags=tag)
+
+            # 馬番・馬名（大きめ）
+            c.create_text(22, ry+5,
+                text=f"{h['number']}番  {h['name']}",
+                fill=TEXT_W, anchor="nw",
+                font=("Courier",11,"bold"), tags=tag)
+
             # ステータス
             stars_spd = "★"*h["speed"]  + "☆"*(5-h["speed"])
             stars_stm = "★"*h["stamina"]+ "☆"*(5-h["stamina"])
-            c.create_text(26, ry+26,
-                text=f"速{stars_spd} 耐{stars_stm} 調{h['condition']}",
-                fill=TEXT_G, anchor="nw", font=("Courier",9), tags=tag)
-            # 一言評価
-            comment = h.get("comment","")[:28]
-            c.create_text(26, ry+42,
-                text=comment,
-                fill=FLAG_COL, anchor="nw", font=("Courier",8), tags=tag)
-            # 投票済みマーク or クリックヒント
+            c.create_text(22, ry+24,
+                text=f"速{stars_spd}  耐{stars_stm}  調{h['condition']}",
+                fill=TEXT_G, anchor="nw",
+                font=("Courier",10), tags=tag)
+
+            # 一言評価（枠内折り返し）
+            comment  = h.get("comment","")
+            max_c    = (HR_HORSE_W - 30) // 7   # 7px/文字で概算
+            line1    = comment[:max_c]
+            line2    = comment[max_c:max_c*2]
+            txt_y    = ry + min(42, row_h - 34)
+            c.create_text(22, txt_y,
+                text=line1,
+                fill=FLAG_COL, anchor="nw",
+                font=("Courier",9), tags=tag)
+            if line2 and row_h >= 72:
+                c.create_text(22, txt_y+13,
+                    text=line2,
+                    fill=FLAG_COL, anchor="nw",
+                    font=("Courier",9), tags=tag)
+
+            # オッズ（馬カラム右上）
+            odds_col = MINE_COL if odds_val < 3.0 else (FLAG_COL if odds_val < 6.0 else SAFE_COL)
+            c.create_text(HR_HORSE_W-8, ry+5,
+                text=f"{odds_val:.1f}倍",
+                fill=odds_col, anchor="ne",
+                font=("Courier",11,"bold"), tags=tag)
+
+            # 投票済み / クリックヒント
             if is_voted:
-                c.create_text(HR_INFO_W-10, ry+row_h//2,
+                c.create_text(HR_HORSE_W-8, ry+row_h-10,
                     text="✅ 投票済",
-                    fill=SAFE_COL, anchor="e", font=("Courier",10,"bold"), tags=tag)
+                    fill=SAFE_COL, anchor="ne",
+                    font=("Courier",10,"bold"), tags=tag)
             else:
-                c.create_text(HR_INFO_W-10, ry+row_h//2,
-                    text=f"{votes_n}票" + (" ←Click" if is_hover else ""),
+                hint = " ←Click" if is_hover else ""
+                c.create_text(HR_HORSE_W-8, ry+row_h-10,
+                    text=f"{votes_n}票{hint}",
                     fill=SAFE_COL if votes_n>0 else TEXT_G,
-                    anchor="e", font=("Courier",10,"bold"), tags=tag)
+                    anchor="ne", font=("Courier",10), tags=tag)
 
-        # 右パネル: 投票状況
-        rx = HR_INFO_W + 20
-        c.create_text(rx, 90, text="📊 投票状況",
-            fill=ACCENT_COL, anchor="nw", font=("Courier",14,"bold"), tags=tag)
+            # ── 騎手カラム ──
+            jock    = h["jockey"]
+            jname   = jock["name"]   # 苗字のみ（horserace.pyで制御）
+            jskl    = "★"*jock["skill"] + "☆"*(5-jock["skill"])
+            jstyle  = jock["style"]
+            aff_sym = h["affinity"]
+            aff_col = (SAFE_COL if aff_sym=="◎" else
+                       ACCENT_COL if aff_sym=="○" else
+                       FLAG_COL   if aff_sym=="△" else MINE_COL)
 
+            jbg = "#1A1E34" if is_hover else "#13162A"
+            c.create_rectangle(HR_HORSE_W+1, ry, HR_INFO_W-1, ry+row_h-2,
+                fill=jbg, outline="", tags=tag)
+
+            lh = max(16, row_h // 4)   # 行間（row_hに合わせて可変）
+
+            c.create_text(HR_HORSE_W+8, ry+4,
+                text=jname,
+                fill=TEXT_W, anchor="nw",
+                font=("Courier",11,"bold"), tags=tag)
+            c.create_text(HR_HORSE_W+8, ry+4+lh,
+                text=jskl,
+                fill=TEXT_G, anchor="nw",
+                font=("Courier",9), tags=tag)
+            c.create_text(HR_HORSE_W+8, ry+4+lh*2,
+                text=jstyle,
+                fill=TEXT_G, anchor="nw",
+                font=("Courier",9), tags=tag)
+            c.create_text(HR_HORSE_W+8, ry+4+lh*3,
+                text=f"相性 {aff_sym}",
+                fill=aff_col, anchor="nw",
+                font=("Courier",10,"bold"), tags=tag)
+
+            # レーン区切り
+            c.create_line(0, ry+row_h-1, HR_INFO_W, ry+row_h-1,
+                fill=CELL_BORDER, width=1, tags=tag)
+
+        # ── 投票状況カラム ──
+        rx          = vx + 16
+        vote_w      = self.win_w - vx - 20
         total_votes = sum(self.votes.values()) or 1
-        bar_max_w   = self.win_w - HR_INFO_W - 40
-        by = 126
+        bar_max_w   = vote_w - 80
+
+        by = y
         for h in self.horses:
             num   = h["number"]
             cnt   = self.votes.get(num, 0)
             pct   = cnt / total_votes
             col   = HR_COLORS[(num-1) % len(HR_COLORS)]
             bar_w = int(bar_max_w * pct)
+            odds_val = self.odds.get(num, 0.0)
+            odds_col = MINE_COL if odds_val<3.0 else (FLAG_COL if odds_val<6.0 else SAFE_COL)
 
-            c.create_text(rx, by, text=f"{num}番 {h['name'][:8]}",
-                fill=TEXT_W, anchor="nw", font=("Courier",10), tags=tag)
-            c.create_rectangle(rx, by+16, rx+bar_max_w, by+28,
+            c.create_text(rx, by+4,
+                text=f"{num}番 {h['name'][:8]}",
+                fill=TEXT_W, anchor="nw", font=("Courier",10,"bold"), tags=tag)
+            c.create_text(rx+bar_max_w-4, by+4,
+                text=f"{odds_val:.1f}倍",
+                fill=odds_col, anchor="ne", font=("Courier",10,"bold"), tags=tag)
+            c.create_rectangle(rx, by+20, rx+bar_max_w, by+32,
                 fill=CELL_HID, outline="", tags=tag)
             if bar_w > 0:
-                c.create_rectangle(rx, by+16, rx+bar_w, by+28,
+                c.create_rectangle(rx, by+20, rx+bar_w, by+32,
                     fill=col, outline="", tags=tag)
-            c.create_text(rx+bar_max_w+6, by+22,
-                text=f"{cnt}票 ({pct*100:.0f}%)",
+            c.create_text(rx+bar_max_w+6, by+26,
+                text=f"{cnt}票({pct*100:.0f}%)",
                 fill=TEXT_G, anchor="w", font=("Courier",9), tags=tag)
-            by += 42
+            by += row_h
 
         # タイマー
-        ratio = max(0, self.vote_timer / self.vote_sec)
-        bar_col = SAFE_COL if ratio > 0.4 else FLAG_COL if ratio > 0.15 else MINE_COL
-        tw = self.win_w - HR_INFO_W - 40
-        ty = self.win_h - 50
-        c.create_rectangle(rx, ty, rx+tw, ty+14,
+        ratio   = max(0, self.vote_timer / self.vote_sec)
+        bar_col = SAFE_COL if ratio>0.4 else FLAG_COL if ratio>0.15 else MINE_COL
+        ty      = self.win_h - 50
+        c.create_rectangle(rx, ty, rx+bar_max_w, ty+12,
             fill=CELL_HID, outline="", tags=tag)
         if ratio > 0:
-            c.create_rectangle(rx, ty, rx+int(tw*ratio), ty+14,
+            c.create_rectangle(rx, ty, rx+int(bar_max_w*ratio), ty+12,
                 fill=bar_col, outline="", tags=tag)
-        c.create_text(self.win_w//2, ty-16,
+        c.create_text(vx + vote_w//2, ty-18,
             text=f"投票受付中  残り {max(0,self.vote_timer):.0f}秒  [Spaceで締切]",
-            fill=bar_col, font=("Courier",12,"bold"), tags=tag)
+            fill=bar_col, font=("Courier",11,"bold"), tags=tag)
 
     def _draw_gate(self):
-        c = self.canvas
+        c   = self.canvas
         tag = "hr_main"
+
+        # ── 背景（芝/ダート共にCanvas描画） ──
+        surf_col = "#2A4A1A" if self.race["surface"] == "芝" else "#4A3010"
+        c.create_rectangle(0, 0, self.win_w, self.win_h,
+            fill=surf_col, outline="", tags=tag)
+
         self._draw_header()
 
-        cy = self.win_h // 2
-        c.create_text(self.win_w//2, cy - 60,
-            text="🏇 出走準備",
-            fill=ACCENT_COL, font=("Courier",24,"bold"), tags=tag)
+        # ── レイアウト ──
+        n         = len(self.horses)
+        track_h   = self.win_h - 80 - 60
+        lane_h    = track_h // n
+        img_h     = int(lane_h * 0.85)
+        gate_x    = int(self.win_w * 0.38)   # ゲートバーのx位置
+        label_x   = gate_x - 12              # 馬名ラベルの右端
+        track_y   = 80
 
-        # ゲート描画
-        gate_x  = self.win_w // 2 - 200
-        lane_h  = 44
-        n       = len(self.horses)
-        total_h = n * lane_h
-        start_y = cy - total_h // 2
+        # フェーズ内時間で演出を制御
+        # 0〜1.0秒: ゲート待機（カウントダウン表示）
+        # 1.0〜2.0秒: カウントダウン3→2→1
+        # 2.0秒〜: ゲートオープン、馬が加速して右へ
+        t = self.phase_t
+        opened = t >= 2.0
 
-        # ゲートオープン演出（phase_t > 1.5 で開く）
-        opened = self.phase_t > 1.5
+        # カウントダウン表示
+        if t < 2.0:
+            cd_num = 3 - int(t)
+            cd_col = [MINE_COL, FLAG_COL, SAFE_COL][max(0, cd_num - 1)]
+            cd_size = 48 + int((t % 1.0) * 12)  # 脈動
+            c.create_text(self.win_w // 2, self.win_h // 2,
+                text=str(max(1, cd_num)),
+                fill=cd_col, font=("Courier", cd_size, "bold"), tags=tag)
+        else:
+            elapsed = t - 2.0
+            c.create_text(self.win_w // 2, track_y + track_h + 30,
+                text="ゲートオープン！",
+                fill=FLAG_COL, font=("Courier", 22, "bold"), tags=tag)
 
         for i, h in enumerate(self.horses):
-            ry  = start_y + i * lane_h
-            col = HR_COLORS[(h['number']-1) % len(HR_COLORS)]
+            ry  = track_y + i * lane_h
+            col = HR_COLORS[(h["number"] - 1) % len(HR_COLORS)]
 
-            # レーン背景
-            c.create_rectangle(gate_x-10, ry, self.win_w-40, ry+lane_h-2,
-                fill=CELL_HID if not opened else "#1A2A1A",
-                outline=CELL_BORDER, tags=tag)
+            # レーン区切り線
+            c.create_line(0, ry + lane_h - 1, self.win_w, ry + lane_h - 1,
+                fill="#333333", width=1, tags=tag)
 
-            # 馬番
-            c.create_text(gate_x, ry+lane_h//2,
-                text=f"{h['number']}", fill=col,
-                font=("Courier",14,"bold"), tags=tag)
+            # 馬番・馬名ラベル（ゲート左側）
+            c.create_text(label_x, ry + lane_h // 2,
+                text=f"{h['number']} {h['name'][:7]}",
+                fill=col, anchor="e",
+                font=("Courier", 11, "bold"), tags=tag)
 
-            # 馬（ゲート前に待機）
-            hx = gate_x + 60 if not opened else gate_x + 60 + int(self.phase_t * 80)
-            self.renderers[i].clear(c)
-            self.renderers[i].draw(c, hx, ry+lane_h//2, col,
-                                   frame=self.anim_frame if opened else 0,
-                                   scale=0.7)
-
-            # 馬名
-            c.create_text(gate_x - 80, ry+lane_h//2,
-                text=h["name"][:8], fill=TEXT_W,
-                anchor="e", font=("Courier",10), tags=tag)
-
-            # ゲートバー（開く演出）
+            # ゲートバー（オープン前のみ）
             if not opened:
-                c.create_rectangle(gate_x+40, ry, gate_x+46, ry+lane_h-2,
-                    fill="#888888", outline="", tags=tag)
+                c.create_rectangle(gate_x, ry, gate_x + 8, ry + lane_h - 2,
+                    fill="#CCCCCC", outline="#888888", width=1, tags=tag)
 
-        if opened:
-            c.create_text(self.win_w//2, cy + total_h//2 + 30,
-                text="ゲートオープン！",
-                fill=FLAG_COL, font=("Courier",20,"bold"), tags=tag)
+            # 馬の位置計算
+            if not opened:
+                # 待機中：ゲート直前で微振動
+                sway = int(math.sin(t * 6 + i) * 2)
+                hx   = gate_x - img_h // 2 + sway
+            else:
+                # オープン後：加速して右へ飛び出す
+                elapsed = t - 2.0
+                # 加速度を持った移動（easeOut）
+                accel = min(elapsed * elapsed * 180, self.win_w)
+                hx = gate_x + int(accel)
+
+            hy = ry + lane_h // 2
+
+            self.renderers[i].clear(c)
+            if self.use_images:
+                self.renderers[i].draw(c, hx, hy, col,
+                    horse_number=h["number"],
+                    coat=h.get("coat", "brown"))
+            else:
+                self.renderers[i].draw(c, hx, hy, col,
+                    frame=self.anim_frame if opened else 0,
+                    scale=0.7)
+
+        # phase_t >= 3.0 でレース開始（_update_phaseで制御）
 
     def _draw_race(self):
         c = self.canvas
@@ -2357,9 +2701,16 @@ class HorseRaceScreen:
 
             # 馬の位置（走行エリア内のみ）
             hx = run_x + int(run_w * min(pos, 1.0))
+            # sin波で上下揺れ（疾走感）
+            sway = int(math.sin(self.phase_t * 8 + i) * 3) if pos > 0 else 0
             self.renderers[i].clear(c)
-            self.renderers[i].draw(c, hx, ry+lane_h//2, col,
-                                   frame=self.anim_frame, scale=0.65)
+            if self.use_images:
+                self.renderers[i].draw(c, hx, ry+lane_h//2+sway, col,
+                                       horse_number=h["number"],
+                                       coat=h.get("coat","brown"))
+            else:
+                self.renderers[i].draw(c, hx, ry+lane_h//2+sway, col,
+                                       frame=self.anim_frame, scale=0.65)
 
         # 距離表示
         surf_col2 = "#50E080" if surface == "芝" else "#C8A050"
@@ -2377,32 +2728,134 @@ class HorseRaceScreen:
             text=f"({dist_label})",
             fill=TEXT_G, font=("Courier",10), tags=tag)
 
-    def _draw_goal_overlay(self):
-        c = self.canvas
-        tag = "hr_overlay"
+    def _draw_goal_scene(self):
+        """ゴール演出（5.5秒）
+        0〜1.0s : レース画面継続、右端にゴールポスト出現
+        1.0〜2.5s: ゴール瞬間フラッシュ、背景にゴール画像
+        2.5〜5.5s: 勝ち馬スライドイン、順位表示、花吹雪
+        """
+        c   = self.canvas
+        tag = "hr_main"
+        t   = self.phase_t
+
         if not self.results:
             return
         winner = next((r for r in self.results if r["rank"]==1), None)
         if not winner:
             return
-
-        # フラッシュ
-        if self.finish_flash > 0:
-            alpha_stip = "gray75" if self.finish_flash > 1.0 else "gray50"
-            c.create_rectangle(0,0,self.win_w,self.win_h,
-                fill=FLAG_COL, outline="", stipple=alpha_stip, tags=tag)
-
-        cx = self.win_w // 2
-        cy = self.win_h // 2
-        c.create_rectangle(cx-260,cy-60,cx+260,cy+60,
-            fill=BG, outline=FLAG_COL, width=3, tags=tag)
         col = HR_COLORS[(winner["horse"]["number"]-1) % len(HR_COLORS)]
-        c.create_text(cx, cy-20,
-            text=f"🏆 {winner['horse']['number']}番  {winner['horse']['name']}",
-            fill=col, font=("Courier",22,"bold"), tags=tag)
-        c.create_text(cx, cy+20,
-            text="ゴール！",
-            fill=FLAG_COL, font=("Courier",16,"bold"), tags=tag)
+        cx  = self.win_w // 2
+        cy  = self.win_h // 2
+
+        # ── フェーズ1(0〜1.5s): ゴール画像フル表示＋GOAL!!テキスト ──
+        if t < 1.5:
+            sub_t = t
+            # ゴール背景画像
+            if hasattr(self, "_goal_bg_img") and self._goal_bg_img:
+                c.create_image(0, 0, image=self._goal_bg_img,
+                    anchor="nw", tags=tag)
+            else:
+                c.create_rectangle(0, 0, self.win_w, self.win_h,
+                    fill="#006600", outline="", tags=tag)
+            # フラッシュ
+            if sub_t < 0.5:
+                stip = "gray75" if sub_t < 0.25 else "gray50"
+                c.create_rectangle(0, 0, self.win_w, self.win_h,
+                    fill="#FFFFFF", outline="", stipple=stip, tags=tag)
+            # 「ゴール！」大テキスト
+            scale_t = min(1.0, sub_t / 0.4)
+            size    = int(28 + scale_t * 24)
+            c.create_text(cx+3, cy+3,
+                text="GOAL !!",
+                fill="#000000", font=("Courier",size,"bold"), tags=tag)
+            c.create_text(cx, cy,
+                text="GOAL !!",
+                fill=FLAG_COL, font=("Courier",size,"bold"), tags=tag)
+            # 勝ち馬名
+            if sub_t > 0.5:
+                c.create_text(cx, cy+size+12,
+                    text=f"{winner['horse']['number']}番  {winner['horse']['name']}",
+                    fill=col, font=("Courier",20,"bold"), tags=tag)
+            return
+
+        # ── フェーズ2(1.5〜2.5s): 勝ち馬スライドイン ──
+        if t < 2.5:
+            sub_t = t - 1.5
+            # ゴール背景（暗め）
+            if hasattr(self, "_goal_bg_img") and self._goal_bg_img:
+                c.create_image(0, 0, image=self._goal_bg_img,
+                    anchor="nw", tags=tag)
+                c.create_rectangle(0, 0, self.win_w, self.win_h,
+                    fill=BG, outline="", stipple="gray50", tags=tag)
+            else:
+                c.create_rectangle(0, 0, self.win_w, self.win_h,
+                    fill=BG, outline="", tags=tag)
+            # 勝ち馬スライドイン（左から中央へ）
+            if self.use_images and hasattr(self, "_goal_big_img") and self._goal_big_img:
+                slide = min(1.0, sub_t / 0.6)
+                ease  = 1 - (1 - slide) ** 3   # easeOutCubic
+                img_x = int(-300 + ease * (cx * 0.5 + 300))
+                c.create_image(img_x, cy + 10,
+                    image=self._goal_big_img,
+                    anchor="center", tags=tag)
+            # 馬名テキスト
+            if sub_t > 0.4:
+                c.create_text(cx + 20, cy - 80,
+                    text=f"🏆 {winner['horse']['number']}番  {winner['horse']['name']}",
+                    fill=col, font=("Courier",22,"bold"), tags=tag)
+            return
+
+        # ── フェーズ3(2.5〜5.5s): 勝ち馬大表示＋順位＋花吹雪 ──
+        sub_t = t - 2.5
+
+        # 背景（ゴール画像を薄く）
+        if hasattr(self, "_goal_bg_img") and self._goal_bg_img:
+            c.create_image(0, 0, image=self._goal_bg_img,
+                anchor="nw", tags=tag)
+            # 暗幕
+            c.create_rectangle(0, 0, self.win_w, self.win_h,
+                fill=BG, outline="", stipple="gray75", tags=tag)
+        else:
+            c.create_rectangle(0, 0, self.win_w, self.win_h,
+                fill=BG, outline="", tags=tag)
+
+        # 勝ち馬画像スライドイン（左から）
+        if self.use_images and hasattr(self, "_goal_big_img") and self._goal_big_img:
+            slide = min(1.0, sub_t / 0.6)
+            ease  = 1 - (1-slide)**3  # easeOutCubic
+            img_x = int(-200 + ease * (cx * 0.55 + 200))
+            c.create_image(img_x, cy + 20,
+                image=self._goal_big_img,
+                anchor="center", tags=tag)
+
+        # 右側: 順位表
+        rx = cx + 40
+        c.create_text(rx, cy - 120,
+            text="🏆 レース結果",
+            fill=FLAG_COL, font=("Courier",16,"bold"),
+            anchor="w", tags=tag)
+        medals = ["🥇","🥈","🥉"] + [f"{r}位" for r in range(4,9)]
+        row_y  = cy - 90
+        for res in self.results[:5]:
+            rank  = res["rank"]
+            h     = res["horse"]
+            hcol  = HR_COLORS[(h["number"]-1) % len(HR_COLORS)]
+            rcol  = FLAG_COL if rank==1 else (ACCENT_COL if rank==2 else
+                    SAFE_COL if rank==3 else TEXT_G)
+            # 少し遅延して順に出現
+            if sub_t > rank * 0.18:
+                c.create_text(rx, row_y,
+                    text=f"{medals[rank-1]}  {h['number']}番 {h['name']}",
+                    fill=rcol, anchor="w",
+                    font=("Courier",13,"bold" if rank<=3 else "normal"), tags=tag)
+            row_y += 38
+
+        # 花吹雪
+        if hasattr(self, "_goal_particles"):
+            for p in self._goal_particles:
+                r = p["r"]
+                c.create_oval(p["x"]-r, p["y"]-r, p["x"]+r, p["y"]+r,
+                    fill=p["color"], outline="", tags=tag)
 
     def _draw_result(self):
         c = self.canvas
@@ -2501,7 +2954,7 @@ class HorseRaceScreen:
                     fill=ACCENT_COL, font=("Courier",11,"bold"), tags=tag)
                 ry2 += 20
                 ranked   = sorted(self.cumulative.items(),
-                                  key=lambda x: (-x[1]["hits"], -x[1]["votes"]))
+                                  key=lambda x: (-x[1].get("points",1.0), -x[1]["hits"]))
                 medals_r = ["🥇","🥈","🥉"] + ["  " for _ in range(20)]
                 for ri, (uname, stat) in enumerate(ranked):
                     if ry2 + 18 > rank_bottom:
@@ -2511,16 +2964,17 @@ class HorseRaceScreen:
                                 text=f"他{remaining}人...",
                                 fill=TEXT_G, font=("Courier",9), tags=tag)
                         break
-                    medal = medals_r[ri]
-                    hits  = stat["hits"]
-                    votes = stat["votes"]
-                    col_u = FLAG_COL if ri==0 else (ACCENT_COL if ri==1 else
-                            (SAFE_COL if ri==2 else TEXT_W))
+                    medal  = medals_r[ri]
+                    hits   = stat["hits"]
+                    votes  = stat["votes"]
+                    pts    = stat.get("points", 1.0)
+                    col_u  = FLAG_COL if ri==0 else (ACCENT_COL if ri==1 else
+                             (SAFE_COL if ri==2 else TEXT_W))
                     c.create_text(cx - 160, ry2,
                         text=f"{medal} {uname[:14]}",
                         fill=col_u, anchor="w", font=("Courier",10,"bold"), tags=tag)
-                    c.create_text(cx + 100, ry2,
-                        text=f"{hits}/{votes}票的中",
+                    c.create_text(cx + 80, ry2,
+                        text=f"{pts:.1f}pt  {hits}/{votes}的中",
                         fill=col_u, anchor="w", font=("Courier",10), tags=tag)
                     ry2 += 18
         c.create_rectangle(bx1, by, bx1+130, by+38,
@@ -2571,28 +3025,37 @@ class HorseRaceScreen:
                 fill=TEXT_G, font=("Courier",14), tags=tag)
         else:
             ranked = sorted(self.cumulative.items(),
-                            key=lambda x: (-x[1]["hits"], -x[1]["votes"]))
+                            key=lambda x: (-x[1].get("points",1.0), -x[1]["hits"]))
             medals_f = ["🥇","🥈","🥉"] + [f"{i}位" for i in range(4, 50)]
-            row_h_f  = min(54, (self.win_h - 160) // max(len(ranked), 1))
-            sy       = 100
+            row_h_f  = min(54, (self.win_h - 180) // max(len(ranked), 1))
+            sy       = 110
+
+            # ヘッダー
+            c.create_text(cx-220, sy-20, text="プレイヤー",
+                fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
+            c.create_text(cx+60, sy-20, text="ポイント",
+                fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
+            c.create_text(cx+160, sy-20, text="的中/投票",
+                fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
 
             for ri, (uname, stat) in enumerate(ranked):
-                ry     = sy + ri * row_h_f
+                ry    = sy + ri * row_h_f
                 if ry + row_h_f > self.win_h - 80:
                     remaining = len(ranked) - ri
                     c.create_text(cx, ry,
                         text=f"他{remaining}人...",
                         fill=TEXT_G, font=("Courier",11), tags=tag)
                     break
-                medal  = medals_f[ri]
-                hits   = stat["hits"]
-                votes  = stat["votes"]
-                pct    = int(hits/votes*100) if votes else 0
-                col_u  = FLAG_COL if ri==0 else (ACCENT_COL if ri==1 else
-                         (SAFE_COL if ri==2 else TEXT_W))
+                medal = medals_f[ri]
+                hits  = stat["hits"]
+                votes = stat["votes"]
+                pts   = stat.get("points", 1.0)
+                pct   = int(hits/votes*100) if votes else 0
+                col_u = FLAG_COL if ri==0 else (ACCENT_COL if ri==1 else
+                        (SAFE_COL if ri==2 else TEXT_W))
 
                 if ri < 3:
-                    c.create_rectangle(cx-280, ry, cx+280, ry+row_h_f-2,
+                    c.create_rectangle(cx-280, ry, cx+300, ry+row_h_f-2,
                         fill=BTN_DARK, outline=col_u, tags=tag)
 
                 c.create_text(cx-270, ry+row_h_f//2,
@@ -2601,11 +3064,11 @@ class HorseRaceScreen:
                 c.create_text(cx-220, ry+row_h_f//2,
                     text=uname[:16], fill=col_u, anchor="w",
                     font=("Courier",13,"bold" if ri<3 else "normal"), tags=tag)
-                c.create_text(cx+80, ry+row_h_f//2,
-                    text=f"{hits} / {votes}票",
-                    fill=col_u, anchor="w", font=("Courier",12), tags=tag)
-                c.create_text(cx+200, ry+row_h_f//2,
-                    text=f"({pct}%)",
+                c.create_text(cx+60, ry+row_h_f//2,
+                    text=f"{pts:.1f}pt",
+                    fill=col_u, anchor="w", font=("Courier",13,"bold"), tags=tag)
+                c.create_text(cx+160, ry+row_h_f//2,
+                    text=f"{hits}/{votes} ({pct}%)",
                     fill=TEXT_G, anchor="w", font=("Courier",11), tags=tag)
 
         # メニューボタン
@@ -2648,6 +3111,413 @@ class HorseRaceScreen:
         self.my_vote      = None
         self.hover_horse  = None
         self._vote_rects  = []
+class PaintScreen:
+    def __init__(self, root, cfg, on_menu):
+        self.root    = root
+        self.cfg     = cfg
+        self.on_menu = on_menu
+
+        root.title("ChatViewPlayGame - ペイント")
+        root.configure(bg=BG)
+
+        res_name = cfg.get("resolution", DEFAULT_RES)
+        self.win_w, self.win_h = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
+
+        # 描画エリアサイズ
+        self.draw_w = self.win_w - PT_PANEL_W
+        self.draw_h = self.win_h
+
+        # ツール状態
+        self.tool    = "pen"     # pen / line / rect / oval / eraser
+        self.color   = "#000000"
+        self.width   = 3
+        self.prev_x  = None
+        self.prev_y  = None
+        self.start_x = None
+        self.start_y = None
+        self.temp_id = None      # ゴムバンドプレビュー用
+
+        # 描画オブジェクトIDスタック（undo用）
+        self.draw_ids = []
+
+        # 弾幕
+        self.danmaku   = []
+        self._running  = True
+        self.prev_time = time.time()
+
+        # Canvas（全体）
+        self.canvas = tk.Canvas(root, width=self.win_w, height=self.win_h,
+                                bg="#1A1A2A", highlightthickness=0, cursor="crosshair")
+        self.canvas.pack()
+
+        # 描画エリア背景（白いキャンバス）
+        self.canvas.create_rectangle(0, 0, self.draw_w, self.draw_h,
+                                     fill="#FFFFFF", outline="", tags="canvas_bg")
+
+        # Twitch
+        self.online_mode = cfg.get("online_mode", True)
+        self.twitch = TwitchClient(
+            cfg.get("channel",""), cfg.get("token",""),
+            on_command=lambda *a: None,
+            on_chat=self._on_chat,
+        )
+        if self.online_mode:
+            threading.Thread(
+                target=lambda: asyncio.run(self.twitch.connect()), daemon=True
+            ).start()
+
+        # イベントバインド
+        self.canvas.bind("<ButtonPress-1>",   self._on_press)
+        self.canvas.bind("<B1-Motion>",       self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+
+        self._build_panel()
+        self._loop()
+
+    # ── ツールパネル ──────────────────────────
+    def _build_panel(self):
+        px = self.draw_w
+        c  = self.canvas
+        pw = PT_PANEL_W
+
+        # パネル背景
+        c.create_rectangle(px, 0, self.win_w, self.win_h,
+                           fill=SIDEBAR_BG, outline="", tags="pt_panel")
+        c.create_line(px, 0, px, self.win_h,
+                      fill=CELL_BORDER, width=1, tags="pt_panel")
+
+        # タイトル
+        c.create_text(px+pw//2, 18, text="🎨 ペイント",
+                      fill=ACCENT_COL, font=("Courier",11,"bold"), tags="pt_panel")
+
+        # ── ツール選択ボタン ──
+        tools = [
+            ("pen",    "✏ ペン"),
+            ("line",   "／ 直線"),
+            ("rect",   "□ 四角"),
+            ("oval",   "○ 円"),
+            ("eraser", "✦ 消しゴム"),
+        ]
+        self._tool_btns = {}
+        ty = 44
+        for tid, tlabel in tools:
+            bid = c.create_rectangle(px+8, ty, px+pw-8, ty+26,
+                fill=ACCENT_COL if tid==self.tool else BTN_DARK,
+                outline=CELL_BORDER, tags="pt_panel")
+            txt = c.create_text(px+pw//2, ty+13, text=tlabel,
+                fill=BG if tid==self.tool else TEXT_W,
+                font=("Courier",10,"bold"), tags="pt_panel")
+            self._tool_btns[tid] = (bid, txt, ty)
+            # クリックバインド
+            for item in (bid, txt):
+                c.tag_bind(item, "<Button-1>",
+                           lambda e, t=tid: self._set_tool(t))
+            ty += 32
+
+        # ── 線の太さ ──
+        c.create_text(px+pw//2, ty+8, text="── 太さ ──",
+                      fill=TEXT_G, font=("Courier",9), tags="pt_panel")
+        ty += 22
+        widths = [1, 3, 5, 8]
+        self._width_btns = {}
+        wx = px + 8
+        for w in widths:
+            ww = (pw - 16) // 4
+            bid = c.create_rectangle(wx, ty, wx+ww-2, ty+24,
+                fill=ACCENT_COL if w==self.width else BTN_DARK,
+                outline=CELL_BORDER, tags="pt_panel")
+            txt = c.create_text(wx+ww//2-1, ty+12, text=str(w),
+                fill=BG if w==self.width else TEXT_W,
+                font=("Courier",10,"bold"), tags="pt_panel")
+            self._width_btns[w] = (bid, txt)
+            for item in (bid, txt):
+                c.tag_bind(item, "<Button-1>",
+                           lambda e, wv=w: self._set_width(wv))
+            wx += ww
+        ty += 30
+
+        # ── カラーパレット ──
+        c.create_text(px+pw//2, ty+8, text="── 色 ──",
+                      fill=TEXT_G, font=("Courier",9), tags="pt_panel")
+        ty += 22
+        self._color_btns = {}
+        cols_per_row = 4
+        cell_w = (pw - 16) // cols_per_row
+        for idx, col in enumerate(PT_COLORS):
+            cx2 = px + 8 + (idx % cols_per_row) * cell_w
+            cy2 = ty + (idx // cols_per_row) * (cell_w - 2)
+            bid = c.create_rectangle(cx2, cy2, cx2+cell_w-3, cy2+cell_w-3,
+                fill=col, outline=SAFE_COL if col==self.color else "#444466",
+                width=2 if col==self.color else 1, tags="pt_panel")
+            self._color_btns[col] = bid
+            c.tag_bind(bid, "<Button-1>",
+                       lambda e, cl=col: self._set_color(cl))
+        ty += (len(PT_COLORS) // cols_per_row) * (cell_w - 2) + 8
+
+        # カスタムカラーボタン
+        bid = c.create_rectangle(px+8, ty, px+pw-8, ty+24,
+            fill=BTN_DARK, outline=CELL_BORDER, tags="pt_panel")
+        txt = c.create_text(px+pw//2, ty+12, text="🎨 カスタム",
+            fill=TEXT_W, font=("Courier",9,"bold"), tags="pt_panel")
+        for item in (bid, txt):
+            c.tag_bind(item, "<Button-1>", self._pick_custom_color)
+        ty += 32
+
+        # ── 現在色プレビュー ──
+        self._cur_color_box = c.create_rectangle(px+8, ty, px+pw-8, ty+28,
+            fill=self.color, outline=CELL_BORDER, width=2, tags="pt_panel")
+        ty += 36
+
+        # ── 操作ボタン ──
+        # 保存
+        y_save = self.win_h - 132
+        bid = c.create_rectangle(px+8, y_save, px+pw-8, y_save+26,
+            fill=ACCENT_COL, outline="", tags="pt_panel")
+        txt = c.create_text(px+pw//2, y_save+13, text="💾 保存",
+            fill=BG, font=("Courier",10,"bold"), tags="pt_panel")
+        for item in (bid, txt):
+            c.tag_bind(item, "<Button-1>", self._save_image)
+        self._save_flash_id  = None   # 保存完了メッセージ用
+        self._save_flash_txt = c.create_text(px+pw//2, y_save-10,
+            text="", fill=SAFE_COL,
+            font=("Courier",8,"bold"), tags="pt_panel")
+
+        # 全消し
+        y_clear = self.win_h - 100
+        bid = c.create_rectangle(px+8, y_clear, px+pw-8, y_clear+28,
+            fill=MINE_COL, outline="", tags="pt_panel")
+        txt = c.create_text(px+pw//2, y_clear+14, text="🗑 全消し",
+            fill="#FFFFFF", font=("Courier",10,"bold"), tags="pt_panel")
+        for item in (bid, txt):
+            c.tag_bind(item, "<Button-1>", self._clear_canvas)
+
+        # undo
+        y_undo = self.win_h - 64
+        bid = c.create_rectangle(px+8, y_undo, px+pw-8, y_undo+24,
+            fill=BTN_DARK, outline=CELL_BORDER, tags="pt_panel")
+        txt = c.create_text(px+pw//2, y_undo+12, text="↩ 元に戻す",
+            fill=TEXT_W, font=("Courier",9,"bold"), tags="pt_panel")
+        for item in (bid, txt):
+            c.tag_bind(item, "<Button-1>", self._undo)
+
+        # メニュー
+        y_menu = self.win_h - 34
+        bid = c.create_rectangle(px+8, y_menu, px+pw-8, y_menu+26,
+            fill=BTN_MENU, outline=CELL_BORDER, tags="pt_panel")
+        txt = c.create_text(px+pw//2, y_menu+13, text="◀ メニュー",
+            fill=TEXT_W, font=("Courier",10,"bold"), tags="pt_panel")
+        for item in (bid, txt):
+            c.tag_bind(item, "<Button-1>", lambda e: self._go_menu())
+
+    # ── ツール・色・太さ変更 ─────────────────
+    def _set_tool(self, tool):
+        self.tool = tool
+        self._refresh_panel()
+
+    def _set_width(self, w):
+        self.width = w
+        self._refresh_panel()
+
+    def _set_color(self, col):
+        self.color = col
+        self._refresh_panel()
+
+    def _pick_custom_color(self, e=None):
+        import tkinter.colorchooser as cc
+        result = cc.askcolor(color=self.color, title="色を選択")
+        if result and result[1]:
+            self.color = result[1]
+            self._refresh_panel()
+
+    def _refresh_panel(self):
+        c = self.canvas
+        # ツールボタン更新
+        for tid, (bid, txt, _) in self._tool_btns.items():
+            active = (tid == self.tool)
+            c.itemconfig(bid, fill=ACCENT_COL if active else BTN_DARK)
+            c.itemconfig(txt, fill=BG if active else TEXT_W)
+        # 太さボタン更新
+        for w, (bid, txt) in self._width_btns.items():
+            active = (w == self.width)
+            c.itemconfig(bid, fill=ACCENT_COL if active else BTN_DARK)
+            c.itemconfig(txt, fill=BG if active else TEXT_W)
+        # カラーパレット更新
+        for col, bid in self._color_btns.items():
+            active = (col == self.color)
+            c.itemconfig(bid,
+                outline=SAFE_COL if active else "#444466",
+                width=2 if active else 1)
+        # 現在色プレビュー更新
+        c.itemconfig(self._cur_color_box, fill=self.color)
+
+    # ── 描画イベント ──────────────────────────
+    def _in_draw_area(self, x, y):
+        return 0 <= x < self.draw_w and 0 <= y < self.draw_h
+
+    def _on_press(self, ev):
+        if not self._in_draw_area(ev.x, ev.y):
+            return
+        self.start_x = ev.x
+        self.start_y = ev.y
+        self.prev_x  = ev.x
+        self.prev_y  = ev.y
+
+    def _on_drag(self, ev):
+        if self.start_x is None:
+            return
+        x = min(max(ev.x, 0), self.draw_w - 1)
+        y = min(max(ev.y, 0), self.draw_h - 1)
+        c = self.canvas
+
+        if self.tool == "pen":
+            if self.prev_x is not None:
+                iid = c.create_line(
+                    self.prev_x, self.prev_y, x, y,
+                    fill=self.color, width=self.width,
+                    capstyle="round", smooth=True)
+                self.draw_ids.append(iid)
+            self.prev_x, self.prev_y = x, y
+
+        elif self.tool == "eraser":
+            r = self.width * 4
+            iid = c.create_oval(x-r, y-r, x+r, y+r,
+                fill="#FFFFFF", outline="#FFFFFF")
+            self.draw_ids.append(iid)
+            self.prev_x, self.prev_y = x, y
+
+        else:
+            # ゴムバンドプレビュー
+            if self.temp_id:
+                c.delete(self.temp_id)
+            if self.tool == "line":
+                self.temp_id = c.create_line(
+                    self.start_x, self.start_y, x, y,
+                    fill=self.color, width=self.width,
+                    capstyle="round", dash=(4,4))
+            elif self.tool == "rect":
+                self.temp_id = c.create_rectangle(
+                    self.start_x, self.start_y, x, y,
+                    outline=self.color, width=self.width, fill="")
+            elif self.tool == "oval":
+                self.temp_id = c.create_oval(
+                    self.start_x, self.start_y, x, y,
+                    outline=self.color, width=self.width, fill="")
+
+    def _on_release(self, ev):
+        if self.start_x is None:
+            return
+        x = min(max(ev.x, 0), self.draw_w - 1)
+        y = min(max(ev.y, 0), self.draw_h - 1)
+        c = self.canvas
+
+        # tempを削除して正式描画
+        if self.temp_id:
+            c.delete(self.temp_id)
+            self.temp_id = None
+
+        if self.tool == "line":
+            iid = c.create_line(
+                self.start_x, self.start_y, x, y,
+                fill=self.color, width=self.width, capstyle="round")
+            self.draw_ids.append(iid)
+        elif self.tool == "rect":
+            iid = c.create_rectangle(
+                self.start_x, self.start_y, x, y,
+                outline=self.color, width=self.width, fill="")
+            self.draw_ids.append(iid)
+        elif self.tool == "oval":
+            iid = c.create_oval(
+                self.start_x, self.start_y, x, y,
+                outline=self.color, width=self.width, fill="")
+            self.draw_ids.append(iid)
+
+        self.start_x = self.start_y = None
+        self.prev_x  = self.prev_y  = None
+
+    # ── 保存 ─────────────────────────────────
+    def _save_image(self, e=None):
+        import datetime, os
+        try:
+            from PIL import ImageGrab
+        except ImportError:
+            self.canvas.itemconfig(self._save_flash_txt, text="Pillowが必要です")
+            return
+
+        # 保存先: exe/スクリプトと同じディレクトリ
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = os.path.join(base_dir, f"paint_{ts}.png")
+
+        try:
+            # ウィンドウ上のCanvas描画エリアの絶対座標を取得してスクリーンショット
+            self.root.update_idletasks()
+            x = self.root.winfo_rootx()
+            y = self.root.winfo_rooty()
+            img = ImageGrab.grab(bbox=(
+                x, y,
+                x + self.draw_w,
+                y + self.draw_h
+            ))
+            img.save(out_path, "PNG")
+
+            # 完了メッセージ（2秒表示）
+            self.canvas.itemconfig(self._save_flash_txt, text="saved!")
+            self.root.after(2000, lambda:
+                self.canvas.itemconfig(self._save_flash_txt, text=""))
+        except Exception as err:
+            self.canvas.itemconfig(self._save_flash_txt, text="保存失敗")
+            print(f"[PaintSave] {err}")
+
+    # ── キャンバス操作 ────────────────────────
+    def _clear_canvas(self, e=None):
+        for iid in self.draw_ids:
+            self.canvas.delete(iid)
+        self.draw_ids.clear()
+
+    def _undo(self, e=None):
+        if self.draw_ids:
+            self.canvas.delete(self.draw_ids.pop())
+
+    # ── Twitch ───────────────────────────────
+    def _on_chat(self, username, text):
+        self.danmaku.append(DanmakuMsg(self.canvas, username, text, self.draw_w))
+
+    # ── ループ ───────────────────────────────
+    def _loop(self):
+        if not self._running:
+            return
+        now = time.time()
+        dt  = now - self.prev_time
+        self.prev_time = now
+
+        for d in self.danmaku:
+            d.update(dt)
+        self.danmaku = [d for d in self.danmaku if d.alive]
+
+        for d in self.danmaku:
+            self.canvas.tag_raise(d.shadow_id)
+            self.canvas.tag_raise(d.text_id)
+
+        # パネルを常に最前面に
+        self.canvas.tag_raise("pt_panel")
+
+        self.root.after(FPS_INTERVAL, self._loop)
+
+    # ── 終了 ─────────────────────────────────
+    def _go_menu(self):
+        self._running = False
+        self.twitch.stop()
+        for d in self.danmaku:
+            try:
+                self.canvas.delete(d.text_id)
+                self.canvas.delete(d.shadow_id)
+            except Exception:
+                pass
+        self.on_menu()
 class App:
     def __init__(self):
         self.root = tk.Tk()
@@ -2683,6 +3553,8 @@ class App:
             self._show_reversi_lobby()
         elif game_id == "horserace":
             self._show_horse_lobby()
+        elif game_id == "paint":
+            self._show_paint()
 
     def _show_ms_lobby(self):
         self._clear()
@@ -2720,6 +3592,11 @@ class App:
         HorseRaceScreen(self.root, cfg, vote_sec, race_count,
                         on_menu=self._show_top_menu)
 
+    def _show_paint(self):
+        self._clear()
+        PaintScreen(self.root, self.cfg,
+                    on_menu=self._show_top_menu)
+
 
 if __name__ == "__main__":
     App()
@@ -2730,4 +3607,8 @@ if __name__ == "__main__":
 
 # ══════════════════════════════════════════════
 #  競馬 ロビー画面
+# ══════════════════════════════════════════════
+
+# ══════════════════════════════════════════════
+#  ペイント画面
 # ══════════════════════════════════════════════

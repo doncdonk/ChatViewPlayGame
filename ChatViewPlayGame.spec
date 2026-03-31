@@ -8,24 +8,39 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('icon.ico', '.'),   # アイコンをexe内に同梱
+        ('icon.ico', '.'),        # アイコン
+        ('img', 'img'),           # 競馬用画像（馬・ゲート）
+        ('horserace.py', '.'),    # 競馬ロジック
+        ('minesweeper.py', '.'),  # ViewBombロジック
+        ('reversi.py', '.'),      # リバーシロジック
+        ('twitch_client.py', '.'),# Twitch接続
+        ('config.py', '.'),       # 設定管理
     ],
     hiddenimports=[
         'tkinter',
         'tkinter.font',
+        'tkinter.colorchooser',
         'asyncio',
         'ssl',
         'json',
         'threading',
         'random',
         'time',
+        'math',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
+        'PIL.ImageGrab',
+        'PIL.ImageOps',
+        'numpy',
+        'numpy.core',
+        'numpy.core._multiarray_umath',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'pygame',
-        'numpy',
         'scipy',
         'matplotlib',
     ],

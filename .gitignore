@@ -14,6 +14,13 @@ __pycache__/
 icon.ico
 icon_preview.png
 
+# ── ペイント機能の出力画像 ──
+paint_*.png
+
+# ── ルート直下のPNGを除外（アプリ使用画像はimg/で管理） ──
+*.png
+!img/**
+
 # ── Python 仮想環境 ──
 .venv/
 venv/

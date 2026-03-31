@@ -1,24 +1,43 @@
 """
-競馬ロジック
-- 馬名・レース名・コース生成
-- ステータス・調子生成
-- レース結果計算（ステータス反映＋ランダム要素）
+競馬ロジック v2
+- 馬名・騎手名・レース名・コース生成
+- ステータス・調子・相性ボーナス生成
+- オッズ計算（全ステータス考慮）
+- レース結果計算
+- 描画抽象クラス
 """
 import random
+import math
 
-# ── 馬名ワードテーブル ──────────────────────────
+# ── 馬名ワードテーブル（最長8文字に統一） ──────
+# PREFIX最長4文字 + SUFFIX最長4文字 = 最大8文字
 PREFIX = [
-    "シン","メイ","ダイ","ゴール","サン","ブラック","ホワイト",
-    "スター","ソード","フラッシュ","ドリーム","ライジング",
-    "ファイア","サイレント","ミラクル","フジ","キング","クイーン",
-    "レッド","ブルー","スカイ","サンダー","ウィンド","オーシャン",
+    "シン","メイ","ダイ","サン","フジ","キング","クイーン",
+    "レッド","ブルー","スカイ","ゴール","スター","ソード",
+    "ドリーム","ライジング"[:4],  # 4文字上限
 ]
+PREFIX = [p[:4] for p in PREFIX]  # 上限4文字
+
 SUFFIX = [
-    "ボルト","フレア","スター","ウイング","ストーム","ブレイズ",
-    "ライト","ランナー","ビート","シャイン","フォース","ブレード",
-    "ホーク","アロー","スピード","ヒーロー","レジェンド","クロス",
-    "バード","ウェーブ","ダッシュ","ソウル","ハート","ドーン",
+    "ボルト","フレア","スター","ウイング"[:4],"ストーム"[:4],"ブレイズ"[:4],
+    "ライト","ランナー"[:4],"ビート","シャイン"[:4],"フォース"[:4],"ブレード"[:4],
+    "ホーク","アロー","ヒーロー"[:4],"クロス","バード","ウェーブ"[:4],
+    "ダッシュ"[:4],"ソウル","ハート","ドーン",
 ]
+SUFFIX = [s[:4] for s in SUFFIX]
+
+MAX_HORSE_NAME = 8  # PREFIX最大4 + SUFFIX最大4
+
+# ── 騎手名ワードテーブル ───────────────────────
+FOREIGN_JOCKEYS = [
+    "ルメール","デムーロ","シュタルケ","モレイラ","ビュイック",
+    "レーン","フォード","マーカンド","ドイル","ヘファーナン",
+]
+
+JOCKEY_FIRST = ["田中","佐藤","鈴木","高橋","伊藤","渡辺","山本","中村","小林","加藤",
+                "松本","井上","木村","林","清水","山田","石川","橋本","阿部","長谷川"]
+JOCKEY_LAST  = ["剛","誠","翔","大輝","健","勇","颯","輝","蓮","陸",
+                "太郎","次郎","一馬","竜也","昌弘","義弘","正樹","和也","雅人","浩二"]
 
 # ── レース名ワードテーブル ──────────────────────
 RACE_PLACE  = ["東京","京都","阪神","中山","札幌","函館","新潟","小倉","中京","福島"]
@@ -43,9 +62,25 @@ CONDITION_WEIGHTS = [15, 35, 35, 15]
 # ── 馬場適性 ────────────────────────────────────
 APTITUDE = ["◎", "○", "△"]
 
+# ── 騎手×馬 相性テーブル ─────────────────────────
+AFFINITY_LABELS = {
+    2: ("◎", 1.15, "相性抜群"),
+    1: ("○", 1.05, "相性良好"),
+    0: ("△", 1.00, "普通"),
+   -1: ("×", 0.92, "相性難"),
+}
+
 
 def make_horse_name():
-    return random.choice(PREFIX) + random.choice(SUFFIX)
+    name = random.choice(PREFIX) + random.choice(SUFFIX)
+    return name[:MAX_HORSE_NAME]
+
+
+def make_jockey_name():
+    # 10%の確率で外国人騎手
+    if random.random() < 0.10:
+        return random.choice(FOREIGN_JOCKEYS)
+    return random.choice(JOCKEY_FIRST)  # 苗字のみ
 
 
 def make_race_name():
@@ -56,23 +91,35 @@ def make_race_name():
 
 
 def make_course():
-    surface  = random.choice(list(COURSES.keys()))
+    surface  = random.choices(list(COURSES.keys()), weights=[70, 30])[0]
     distance = random.choice(COURSES[surface])
     return surface, distance
 
 
-def make_horse(number, surface):
-    """1頭の馬データを生成"""
+def make_jockey():
+    name     = make_jockey_name()
+    skill    = random.randint(1, 5)    # 技術
+    style    = random.choice(["逃げ","先行","差し","追込"])  # 騎乗スタイル
+    return {"name": name, "skill": skill, "style": style}
+
+
+def make_horse(number, surface, jockey):
     name    = make_horse_name()
     speed   = random.randint(1, 5)
     stamina = random.randint(1, 5)
     corner  = random.randint(1, 5)
-    # 馬場適性（メインコースは高めに）
-    apt_turf  = random.choices(APTITUDE, weights=[50, 35, 15])[0] if surface == "芝" \
-                else random.choices(APTITUDE, weights=[15, 35, 50])[0]
-    apt_dirt  = random.choices(APTITUDE, weights=[50, 35, 15])[0] if surface == "ダート" \
-                else random.choices(APTITUDE, weights=[15, 35, 50])[0]
+    apt_turf  = random.choices(APTITUDE, weights=[50,35,15])[0] if surface=="芝" \
+                else random.choices(APTITUDE, weights=[15,35,50])[0]
+    apt_dirt  = random.choices(APTITUDE, weights=[50,35,15])[0] if surface=="ダート" \
+                else random.choices(APTITUDE, weights=[15,35,50])[0]
     cond_sym, cond_mult, cond_label = random.choices(CONDITIONS, weights=CONDITION_WEIGHTS)[0]
+
+    # 騎手との相性（-1, 0, 1, 2）
+    affinity_val = random.choices([-1, 0, 1, 2], weights=[10, 40, 35, 15])[0]
+    aff_sym, aff_mult, aff_label = AFFINITY_LABELS[affinity_val]
+
+    # 馬の毛色（茶色 or 白）
+    coat = random.choice(["brown", "white"])
 
     return {
         "number":     number,
@@ -85,6 +132,11 @@ def make_horse(number, surface):
         "condition":  cond_sym,
         "cond_mult":  cond_mult,
         "cond_label": cond_label,
+        "jockey":     jockey,
+        "affinity":   aff_sym,
+        "aff_mult":   aff_mult,
+        "aff_label":  aff_label,
+        "coat":       coat,
     }
 
 
@@ -93,12 +145,11 @@ def aptitude_score(apt):
 
 
 def calc_base_score(horse, surface, distance):
-    """ステータスからベーススコアを計算"""
     spd = horse["speed"]
     stm = horse["stamina"]
     cor = horse["corner"]
+    jsk = horse["jockey"]["skill"]
 
-    # 距離補正（短距離は速度重視、長距離はスタミナ重視）
     if distance <= 1400:
         score = spd * 2.0 + stm * 0.8 + cor * 0.5
     elif distance <= 1800:
@@ -108,6 +159,9 @@ def calc_base_score(horse, surface, distance):
     else:
         score = spd * 0.7 + stm * 2.2 + cor * 0.8
 
+    # 騎手スキル補正（+最大10%）
+    score *= (1.0 + (jsk - 1) * 0.025)
+
     # 馬場適性補正
     apt = horse["apt_turf"] if surface == "芝" else horse["apt_dirt"]
     score *= aptitude_score(apt)
@@ -115,33 +169,47 @@ def calc_base_score(horse, surface, distance):
     # 調子補正
     score *= horse["cond_mult"]
 
+    # 騎手×馬相性補正
+    score *= horse["aff_mult"]
+
     return score
 
 
+def calc_odds(horses, surface, distance):
+    """
+    全ステータスを考慮したオッズを計算
+    returns: {horse_number: odds_float}
+    """
+    scores = {h["number"]: calc_base_score(h, surface, distance) for h in horses}
+    total  = sum(scores.values())
+    # 勝率に変換してオッズを計算（控除率15%を設定）
+    deduction = 0.85
+    odds = {}
+    for num, score in scores.items():
+        win_rate = score / total
+        raw_odds = deduction / win_rate
+        # 切り上げて0.1刻みに
+        odds[num] = max(1.1, round(raw_odds * 10) / 10)
+    return odds
+
+
 def run_race(horses, surface, distance):
-    """
-    レースを実行してスコアリスト・順位リストを返す
-    returns: [(horse, score, final_pos), ...]  順位順
-    """
     results = []
     for h in horses:
         base   = calc_base_score(h, surface, distance)
-        # ランダム要素 ±20%
         rand   = random.uniform(0.80, 1.20)
         final  = base * rand
         results.append((h, final))
 
     results.sort(key=lambda x: -x[1])
 
-    # 走行位置データを生成（アニメーション用）
-    # 各馬の「最終スコア正規化値」= 0.0〜1.0
     scores = [r[1] for r in results]
     mn, mx = min(scores), max(scores)
     rng    = mx - mn if mx != mn else 1.0
 
     ranked = []
     for rank, (horse, score) in enumerate(results):
-        norm = (score - mn) / rng   # 0〜1
+        norm = (score - mn) / rng
         ranked.append({
             "rank":  rank + 1,
             "horse": horse,
@@ -151,138 +219,258 @@ def run_race(horses, surface, distance):
     return ranked
 
 
+# ── コメント生成（バリエーション強化版） ──────────
+COMMENT_TEMPLATES_STRONG = [
+    "実力最上位、素直に信頼",
+    "文句なしの本命候補",
+    "総合力が抜けており外せない",
+    "能力値トップ、信頼度高い",
+]
+COMMENT_TEMPLATES_WEAK = [
+    "実力差あり、大穴狙いか",
+    "厳しい条件、激走あるか",
+    "苦しい戦い、展開頼み",
+    "前走大敗、変わり身期待",
+]
+COMMENT_COND_GOOD = [
+    "絶好調の今、狙い目",
+    "状態は上々、今日が勝負",
+    "仕上がり抜群、買い時",
+]
+COMMENT_COND_BAD = [
+    "調子に難、今回は静観か",
+    "体調面に不安、割引必要",
+    "状態下降気味で信頼薄",
+]
+COMMENT_DIST_GOOD = [
+    "距離は絶好の条件",
+    "この距離は得意舞台",
+    "距離適性◎で力を出せる",
+]
+COMMENT_DIST_BAD = [
+    "距離がカギ、折り合い注意",
+    "距離不安、消耗戦は厳しい",
+]
+COMMENT_SURF_GOOD = [
+    "馬場適性は申し分なし",
+    "得意の馬場でベスト発揮",
+]
+COMMENT_SURF_BAD = [
+    "馬場が苦手、大幅割引",
+    "不得意馬場で苦戦必至",
+]
+COMMENT_JOCKEY_AFF = [
+    "名手とのコンビで上積み期待",
+    "騎手との相性も良く怖い",
+]
+COMMENT_JOCKEY_BAD = [
+    "騎手との相性に不安あり",
+    "コンビ面での減点要素",
+]
+COMMENT_MID = [
+    "展開次第で一発も",
+    "人気薄で警戒必要",
+    "混戦なら浮上の余地",
+    "実力は中位、侮れない",
+    "堅実な走りが持ち味",
+]
+
+
 def make_comment(horse, surface, distance):
-    """ステータスとレース条件から一言評価を生成"""
     spd = horse["speed"]
     stm = horse["stamina"]
     apt = horse["apt_turf"] if surface == "芝" else horse["apt_dirt"]
     cond = horse["condition"]
+    aff  = horse["affinity"]
+    total = spd + stm + horse["corner"] + horse["jockey"]["skill"]
 
-    comments = []
+    parts = []
 
-    # 距離適性コメント
-    if distance <= 1400:
-        if spd >= 4:
-            comments.append("短距離巧者、スピードは上位")
-        elif spd <= 2:
-            comments.append("スピード不足、距離が忙しい")
-    elif distance >= 2400:
-        if stm >= 4:
-            comments.append("スタミナ豊富、長丁場で本領発揮")
-        elif stm <= 2:
-            comments.append("長距離は疑問、スタミナ不安")
-    else:
-        if spd >= 4 and stm >= 4:
-            comments.append("バランス型、どの展開でも対応可")
-        elif spd >= 4:
-            comments.append("先行力あり、逃げ粘り期待")
-
-    # 馬場適性コメント
-    if apt == "◎":
-        comments.append(f"{surface}は得意コース")
-    elif apt == "△":
-        comments.append(f"{surface}は苦手、割引が必要")
+    # 総合力コメント
+    if total >= 16:
+        parts.append(random.choice(COMMENT_TEMPLATES_STRONG))
+    elif total <= 9:
+        parts.append(random.choice(COMMENT_TEMPLATES_WEAK))
 
     # 調子コメント
     if cond == "◎":
-        comments.append("今日の状態は抜群、本命候補")
+        parts.append(random.choice(COMMENT_COND_GOOD))
     elif cond == "×":
-        comments.append("調子に難あり、過信は禁物")
+        parts.append(random.choice(COMMENT_COND_BAD))
 
-    # 総合評価
-    total = horse["speed"] + horse["stamina"] + horse["corner"]
-    if total >= 12:
-        comments.append("総合力は高く実力上位")
-    elif total <= 7:
-        comments.append("実力は下位、大穴狙いか")
+    # 距離適性
+    if distance <= 1400 and spd >= 4:
+        parts.append(random.choice(COMMENT_DIST_GOOD))
+    elif distance >= 2400 and stm >= 4:
+        parts.append(random.choice(COMMENT_DIST_GOOD))
+    elif distance >= 2400 and stm <= 2:
+        parts.append(random.choice(COMMENT_DIST_BAD))
 
-    if not comments:
-        comments.append("実力は中位、展開次第で一発も")
+    # 馬場適性
+    if apt == "◎":
+        parts.append(random.choice(COMMENT_SURF_GOOD))
+    elif apt == "△":
+        parts.append(random.choice(COMMENT_SURF_BAD))
 
-    return "。".join(comments[:2])
+    # 騎手相性
+    if aff == "◎":
+        parts.append(random.choice(COMMENT_JOCKEY_AFF))
+    elif aff == "×":
+        parts.append(random.choice(COMMENT_JOCKEY_BAD))
+
+    if not parts:
+        parts.append(random.choice(COMMENT_MID))
+
+    # 最大2つ選んで返す
+    selected = random.sample(parts, min(2, len(parts)))
+    return "。".join(selected)
 
 
 def generate_race(num_horses=8):
-    """レース全体を生成して返す"""
-    race_name       = make_race_name()
+    race_name         = make_race_name()
     surface, distance = make_course()
-    horses          = [make_horse(i+1, surface) for i in range(num_horses)]
+    jockeys           = [make_jockey() for _ in range(num_horses)]
+    horses            = [make_horse(i+1, surface, jockeys[i]) for i in range(num_horses)]
     for h in horses:
         h["comment"] = make_comment(h, surface, distance)
+    odds = calc_odds(horses, surface, distance)
     return {
         "name":     race_name,
         "surface":  surface,
         "distance": distance,
         "horses":   horses,
+        "odds":     odds,
     }
+
+
+# ── スプライト切り出し座標 ────────────────────────
+# 800x600の画像から各馬をクロップする座標 (x1,y1,x2,y2)
+SPRITE_CROPS = {
+    1: (0,   0,   400, 200),
+    2: (400, 0,   800, 200),
+    3: (0,   200, 266, 400),
+    4: (266, 200, 533, 400),
+    5: (533, 200, 800, 400),
+    6: (0,   400, 266, 600),
+    7: (266, 400, 533, 600),
+    8: (533, 400, 800, 600),
+}
+
+def load_horse_sprites(img_dir, target_h):
+    """
+    スプライト画像を切り出し・透過・反転・リサイズしてPhotoImageを返す
+    returns: {("brown", num): PhotoImage, ("white", num): PhotoImage}
+             失敗時は None
+    """
+    import os
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        return None
+
+    path_brown = os.path.join(img_dir, "rdesign_19914.png")
+    path_white = os.path.join(img_dir, "rdesign_19916.png")
+
+    if not os.path.exists(path_brown) or not os.path.exists(path_white):
+        return None
+
+    try:
+        sheets = {
+            "brown": Image.open(path_brown).convert("RGBA"),
+            "white": Image.open(path_white).convert("RGBA"),
+        }
+    except Exception:
+        return None
+
+    import numpy as np
+    result = {}
+
+    for coat, sheet in sheets.items():
+        arr = np.array(sheet)
+        # 黒背景透過（RGB合計30以下をα=0）
+        mask = (arr[:,:,0].astype(int)
+              + arr[:,:,1].astype(int)
+              + arr[:,:,2].astype(int)) <= 30
+        arr[mask, 3] = 0
+        sheet_tr = Image.fromarray(arr, "RGBA")
+
+        for num, (x1, y1, x2, y2) in SPRITE_CROPS.items():
+            crop = sheet_tr.crop((x1, y1, x2, y2))
+            # 左右反転（右向きに）
+            crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
+            # リサイズ（アスペクト比維持）
+            ratio    = target_h / crop.height
+            target_w = int(crop.width * ratio)
+            crop     = crop.resize((target_w, target_h), Image.LANCZOS)
+            result[(coat, num)] = ImageTk.PhotoImage(crop)
+
+    return result if result else None
+
+
+def load_gate_image(img_dir, win_w, win_h):
+    """ゲート背景画像を読み込んでPhotoImageを返す。失敗時はNone"""
+    import os
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        return None
+
+    path = os.path.join(img_dir, "rdesign_19917.png")
+    if not os.path.exists(path):
+        return None
+
+    try:
+        img = Image.open(path).convert("RGB")
+        img = img.resize((win_w, win_h), Image.LANCZOS)
+        return ImageTk.PhotoImage(img)
+    except Exception:
+        return None
 
 
 # ── 描画抽象クラス ────────────────────────────────
 class HorseRenderer:
-    """将来の画像差し替えに備えた描画インターフェース"""
     def draw(self, canvas, x, y, color, frame=0, scale=1.0):
         raise NotImplementedError
-
     def clear(self, canvas):
         pass
 
 
 class IconHorseRenderer(HorseRenderer):
-    """
-    現在の実装: Canvas図形で馬シルエットを描画
-    将来 ImageHorseRenderer に差し替え可能
-    """
     def __init__(self, tag_prefix):
         self.tag = tag_prefix
 
     def draw(self, canvas, x, y, color, frame=0, scale=1.0):
-        """
-        x, y: 馬の中心座標
-        frame: アニメフレーム番号（脚の動きに使用）
-        scale: 拡大率
-        """
         tag = self.tag
         s   = scale
-        # 胴体
         canvas.create_oval(
-            x - 22*s, y - 10*s, x + 22*s, y + 10*s,
+            x-22*s, y-10*s, x+22*s, y+10*s,
             fill=color, outline="", tags=tag)
-        # 首
         canvas.create_polygon(
-            x + 14*s, y - 8*s,
-            x + 24*s, y - 22*s,
-            x + 32*s, y - 18*s,
-            x + 20*s, y - 4*s,
+            x+14*s, y-8*s, x+24*s, y-22*s,
+            x+32*s, y-18*s, x+20*s, y-4*s,
             fill=color, outline="", tags=tag)
-        # 頭
         canvas.create_oval(
-            x + 22*s, y - 30*s, x + 38*s, y - 14*s,
+            x+22*s, y-30*s, x+38*s, y-14*s,
             fill=color, outline="", tags=tag)
-        # 耳
         canvas.create_polygon(
-            x + 28*s, y - 30*s,
-            x + 26*s, y - 38*s,
-            x + 31*s, y - 30*s,
+            x+28*s, y-30*s, x+26*s, y-38*s,
+            x+31*s, y-30*s,
             fill=color, outline="", tags=tag)
-        # 脚（フレームで動く）
         leg_offset = [0, 4, 0, -4][frame % 4]
         legs = [
-            (x - 14*s, y + 10*s, x - 14*s, y + 26*s + leg_offset),
-            (x -  4*s, y + 10*s, x -  4*s, y + 26*s - leg_offset),
-            (x +  6*s, y + 10*s, x +  6*s, y + 26*s + leg_offset),
-            (x + 16*s, y + 10*s, x + 16*s, y + 26*s - leg_offset),
+            (x-14*s, y+10*s, x-14*s, y+26*s+leg_offset),
+            (x- 4*s, y+10*s, x- 4*s, y+26*s-leg_offset),
+            (x+ 6*s, y+10*s, x+ 6*s, y+26*s+leg_offset),
+            (x+16*s, y+10*s, x+16*s, y+26*s-leg_offset),
         ]
-        for lx1, ly1, lx2, ly2 in legs:
-            canvas.create_line(lx1, ly1, lx2, ly2,
-                               fill=color, width=max(2, int(3*s)), tags=tag)
-        # たてがみ
+        for lx1,ly1,lx2,ly2 in legs:
+            canvas.create_line(lx1,ly1,lx2,ly2,
+                fill=color, width=max(2,int(3*s)), tags=tag)
         canvas.create_line(
-            x + 16*s, y - 10*s,
-            x + 24*s, y - 24*s,
-            fill="#FFFFFF", width=max(1, int(2*s)), tags=tag)
-        # 目
+            x+16*s, y-10*s, x+24*s, y-24*s,
+            fill="#FFFFFF", width=max(1,int(2*s)), tags=tag)
         canvas.create_oval(
-            x + 30*s, y - 26*s, x + 34*s, y - 22*s,
+            x+30*s, y-26*s, x+34*s, y-22*s,
             fill="#000000", outline="", tags=tag)
 
     def clear(self, canvas):
@@ -290,23 +478,19 @@ class IconHorseRenderer(HorseRenderer):
 
 
 class ImageHorseRenderer(HorseRenderer):
-    """
-    将来の実装: PNG画像フレームでアニメーション描画
-    使用方法:
-        frames = [tk.PhotoImage(file=f"horse_frames/run_{i}.png") for i in range(4)]
-        renderer = ImageHorseRenderer(frames, goal_frame=tk.PhotoImage(file="horse_frames/goal.png"))
-    """
-    def __init__(self, frames, goal_frame=None):
-        self.frames     = frames
-        self.goal_frame = goal_frame
-        self.tag        = "horse_img"
-        self._ids       = []
+    """画像スプライトを使った描画"""
+    def __init__(self, sprites, tag_prefix):
+        # sprites: {("brown", num): PhotoImage, ("white", num): PhotoImage}
+        self.sprites = sprites
+        self.tag     = tag_prefix
 
-    def draw(self, canvas, x, y, color, frame=0, scale=1.0, is_goal=False):
-        img = self.goal_frame if (is_goal and self.goal_frame) else self.frames[frame % len(self.frames)]
-        iid = canvas.create_image(x, y, image=img, anchor="center", tags=self.tag)
-        self._ids.append(iid)
+    def draw(self, canvas, x, y, color, frame=0, scale=1.0,
+             horse_number=1, coat="brown"):
+        key = (coat, horse_number)
+        img = self.sprites.get(key)
+        if img is None:
+            return
+        canvas.create_image(x, y, image=img, anchor="center", tags=self.tag)
 
     def clear(self, canvas):
         canvas.delete(self.tag)
-        self._ids.clear()
