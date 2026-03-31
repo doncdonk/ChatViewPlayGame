@@ -1854,7 +1854,7 @@ class ReversiGameScreen:
                 text=self.hint_text[:32],
                 fill=TEXT_G, font=("Courier",8), tags="rv_sidebar")
 class HorseLobby:
-    def __init__(self, root, cfg, on_start, on_back):
+    def __init__(self, root, cfg, on_start, on_back, on_train=None, on_code=None):
         self.root     = root
         self.cfg      = cfg
         self.on_start = on_start
@@ -1862,6 +1862,9 @@ class HorseLobby:
 
         root.title("ChatViewPlayGame - 競馬")
         root.configure(bg=BG)
+
+        self.on_train  = on_train
+        self.on_code   = on_code
 
         make_label(root, "🏇 競馬",
                    fg=ACCENT_COL, font=("Courier", 20, "bold")).pack(pady=(24,4))
@@ -1896,6 +1899,24 @@ class HorseLobby:
                            activebackground=BG, activeforeground=ACCENT_COL,
                            font=("Courier",11)).pack(side="left", padx=(0,12))
 
+        make_label(frame, "育成馬の連続出走:",
+                   font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(14,4))
+        self.keep_trained_var = tk.BooleanVar(value=cfg.get("hr_keep_trained", False))
+        kf = tk.Frame(frame, bg=BG)
+        kf.pack(fill="x")
+        for val, lbl, desc in [
+            (True,  "有効", "次のレースにも育成馬が引き続き出走"),
+            (False, "無効", "育成馬は1レースのみ"),
+        ]:
+            row = tk.Frame(kf, bg=BG)
+            row.pack(fill="x", pady=1)
+            tk.Radiobutton(row, text=lbl, variable=self.keep_trained_var, value=val,
+                           bg=BG, fg=TEXT_W, selectcolor=CELL_HID,
+                           activebackground=BG, activeforeground=ACCENT_COL,
+                           font=("Courier",11,"bold"), anchor="w").pack(side="left")
+            tk.Label(row, text=f"  {desc}", bg=BG, fg=TEXT_G,
+                     font=("Courier",10)).pack(side="left")
+
         make_label(frame, "結果後の自動遷移:",
                    font=("Courier",12,"bold"), anchor="w").pack(fill="x", pady=(14,4))
         self.auto_var = tk.IntVar(value=cfg.get("hr_auto_next", 0))
@@ -1911,9 +1932,15 @@ class HorseLobby:
         tk.Label(frame, textvariable=self.err_var, bg=BG, fg=MINE_COL,
                  font=("Courier",11)).pack(pady=(8,0))
 
+        tk.Frame(frame, bg=CELL_BORDER, height=1).pack(fill="x", pady=(12,12))
+
         bf = tk.Frame(frame, bg=BG)
-        bf.pack(fill="x", pady=(14,24))
+        bf.pack(fill="x", pady=(0,24))
         make_btn(bf, "◀  戻る", self.on_back).pack(side="left")
+        make_btn(bf, "🐴  馬を育てる", self.on_train,
+                 bg=FLAG_COL, fg=BG).pack(side="left", padx=(8,0))
+        make_btn(bf, "📋  コードで参戦", self.on_code,
+                 bg=ACCENT_COL, fg=BG).pack(side="left", padx=(8,0))
         make_btn(bf, "▶  レース開始", self._start,
                  bg=SAFE_COL, fg=BG).pack(side="right")
 
@@ -1922,9 +1949,10 @@ class HorseLobby:
         if online and (not self.cfg.get("channel") or not self.cfg.get("token","").startswith("oauth:")):
             self.err_var.set("⚠ Settings not configured")
             return
-        self.cfg["hr_vote_sec"]    = self.vote_var.get()
-        self.cfg["hr_auto_next"]   = self.auto_var.get()
-        self.cfg["hr_race_count"]  = self.race_count_var.get()
+        self.cfg["hr_vote_sec"]      = self.vote_var.get()
+        self.cfg["hr_auto_next"]     = self.auto_var.get()
+        self.cfg["hr_race_count"]    = self.race_count_var.get()
+        self.cfg["hr_keep_trained"]  = self.keep_trained_var.get()
         save_config(self.cfg)
         race_count = int(self.race_count_var.get())
         self.on_start(self.cfg, self.vote_var.get(), race_count)
@@ -1938,12 +1966,16 @@ class HorseLobby:
 class HorseRaceScreen:
     PHASES = ["vote", "gate", "race", "goal", "result"]
 
-    def __init__(self, root, cfg, vote_sec, race_count, on_menu):
+    def __init__(self, root, cfg, vote_sec, race_count, on_menu, trained_horse=None, trained_list=None):
         self.root     = root
         self.cfg      = cfg
-        self.vote_sec   = vote_sec
-        self.race_count = race_count   # 0=無限
-        self.on_menu    = on_menu
+        self.vote_sec      = vote_sec
+        self.race_count    = race_count
+        self.on_menu       = on_menu
+        self.trained_horse = trained_horse
+        self.trained_list  = trained_list if trained_list else (
+            [trained_horse] if trained_horse is not None else [])
+        self.keep_trained  = cfg.get("hr_keep_trained", False)
 
         root.title("ChatViewPlayGame - 競馬")
         root.configure(bg=BG)
@@ -1955,11 +1987,29 @@ class HorseRaceScreen:
                                 bg=BG, highlightthickness=0)
         self.canvas.pack()
 
-        # レース生成
-        self.race    = generate_race(num_horses=8)
+        # レース生成（育成馬がいれば残り枠をランダムで補完）
+        t_list = trained_list if trained_list else (
+            [trained_horse] if trained_horse is not None else [])
+        n_trained  = len(t_list)
+        n_random   = max(0, 8 - n_trained)
+        if n_trained > 0:
+            self.race   = generate_race(num_horses=n_random)
+            rand_horses = self.race["horses"]
+            # 育成馬を1〜n_trained番、ランダム馬をn_trained+1〜8番に
+            for i, h in enumerate(t_list):
+                h["number"] = i + 1
+            for i, h in enumerate(rand_horses):
+                h["number"] = n_trained + i + 1
+            self.race["horses"] = t_list + rand_horses
+        else:
+            self.race   = generate_race(num_horses=8)
         self.horses  = self.race["horses"]
-        self.results = None   # run_race後に設定
-        self.odds    = self.race["odds"]   # {horse_number: odds_float}
+        self.results = None
+        self.odds    = self.race["odds"]
+        if n_trained > 0:
+            from horserace import calc_odds
+            self.odds = calc_odds(
+                self.horses, self.race["surface"], self.race["distance"])
 
         # 投票
         self.votes      = {}   # {horse_number: count}
@@ -2095,12 +2145,12 @@ class HorseRaceScreen:
                 rand_spd   = random.uniform(0.9, 1.1)
                 self.horse_pos[idx] = min(1.0, self.horse_pos[idx] + base_speed * rand_spd)
 
-            # 先頭馬がゴールしたらすぐ演出開始
-            if self.horse_pos and max(self.horse_pos) >= 1.0:
+            # 先頭馬がゴールしたらすぐ演出開始（1度だけ）
+            if self.horse_pos and max(self.horse_pos) >= 1.0 and not self._goal_triggered:
+                self._goal_triggered = True
                 self._start_goal()
 
         elif self.phase == "goal":
-            self.finish_flash = 1.5
             if self.phase_t >= 4.0:
                 self.phase          = "result"
                 self.phase_t        = 0.0
@@ -2126,10 +2176,11 @@ class HorseRaceScreen:
                     h["cond_mult"] = min(h["cond_mult"] * 1.05, 1.3)
 
     def _start_race(self):
-        self.phase      = "race"
-        self.phase_t    = 0.0
-        self.results    = run_race(self.horses, self.race["surface"], self.race["distance"])
-        self.horse_pos  = [0.0] * len(self.horses)
+        self.phase           = "race"
+        self.phase_t         = 0.0
+        self._goal_triggered = False
+        self.results         = run_race(self.horses, self.race["surface"], self.race["distance"])
+        self.horse_pos       = [0.0] * len(self.horses)
 
     def _start_goal(self):
         self.phase        = "goal"
@@ -2435,8 +2486,11 @@ class HorseRaceScreen:
                 font=("Courier",11,"bold"), tags=tag)
 
             # ステータス
-            stars_spd = "★"*h["speed"]  + "☆"*(5-h["speed"])
-            stars_stm = "★"*h["stamina"]+ "☆"*(5-h["stamina"])
+            # speed/staminaは1〜10スケール → 5段階表示（切り上げ）
+            spd_s = min(5, max(0, round(h["speed"] / 2)))
+            stm_s = min(5, max(0, round(h["stamina"] / 2)))
+            stars_spd = "★"*spd_s + "☆"*(5-spd_s)
+            stars_stm = "★"*stm_s + "☆"*(5-stm_s)
             c.create_text(22, ry+24,
                 text=f"速{stars_spd}  耐{stars_stm}  調{h['condition']}",
                 fill=TEXT_G, anchor="nw",
@@ -3097,7 +3151,24 @@ class HorseRaceScreen:
         self._transitioning = False
         self._result_btn  = None
         self.current_race += 1
-        self.race         = generate_race(num_horses=8)
+        # 育成馬の連続出走
+        t_list = self.trained_list if self.keep_trained else []
+        n_tr   = len(t_list)
+        n_rnd  = max(0, 8 - n_tr)
+        if n_tr > 0:
+            self.race       = generate_race(num_horses=n_rnd)
+            rand_horses     = self.race["horses"]
+            for i, h in enumerate(t_list):
+                h["number"] = i + 1
+            for i, h in enumerate(rand_horses):
+                h["number"] = n_tr + i + 1
+            self.race["horses"] = t_list + rand_horses
+            from horserace import calc_odds
+            self.odds = calc_odds(
+                self.race["horses"], self.race["surface"], self.race["distance"])
+        else:
+            self.race       = generate_race(num_horses=8)
+            self.odds       = self.race["odds"]
         self.horses       = self.race["horses"]
         self.results      = None
         self.votes        = {}
@@ -3111,6 +3182,22 @@ class HorseRaceScreen:
         self.my_vote      = None
         self.hover_horse  = None
         self._vote_rects  = []
+        self._goal_particles  = []
+        self._goal_triggered  = False
+        # ゴール演出キャッシュをクリア（次レースの勝ち馬に備える）
+        if hasattr(self, "_goal_big_img"):
+            del self._goal_big_img
+        if hasattr(self, "_goal_bg_img"):
+            del self._goal_bg_img
+        # レンダラーも新しい馬に合わせて再生成
+        if self.use_images:
+            self.renderers = [
+                ImageHorseRenderer(self.horse_sprites, f"horse_{i}")
+                for i in range(len(self.horses))
+            ]
+        else:
+            self.renderers = [IconHorseRenderer(f"horse_{i}") for i in range(len(self.horses))]
+
 class PaintScreen:
     def __init__(self, root, cfg, on_menu):
         self.root    = root
@@ -3518,6 +3605,437 @@ class PaintScreen:
             except Exception:
                 pass
         self.on_menu()
+class TrainingScreen:
+    def __init__(self, root, cfg, on_back, on_race):
+        self.root    = root
+        self.cfg     = cfg
+        self.on_back = on_back
+        self.on_race = on_race
+        self._tr     = __import__("training")
+        self.name    = ""
+        self.seed    = self._tr.generate_birth_seed()
+        self.stats   = None
+        self.fatigue = 0
+        self.month   = 0
+        self.history = []
+        self.choices = []
+        root.title("ChatViewPlayGame - 馬育成")
+        root.configure(bg=BG)
+        self._build_name_screen()
+
+    # ── 馬名入力 ──────────────────────────────
+    def _build_name_screen(self):
+        for w in self.root.winfo_children(): w.destroy()
+        make_label(self.root, "🐴 馬を育てる",
+                   fg=ACCENT_COL, font=("Courier",20,"bold")).pack(pady=(28,4))
+        make_label(self.root, "育てる馬の名前を入力してください（カタカナ・最大8文字）",
+                   fg=TEXT_G, font=("Courier",11)).pack(pady=(0,20))
+        frame = tk.Frame(self.root, bg=BG)
+        frame.pack(padx=40)
+        make_label(frame, "馬名:", font=("Courier",12,"bold"), anchor="w").pack(fill="x")
+        self._name_var = tk.StringVar()
+        tk.Entry(frame, textvariable=self._name_var, width=20,
+                 bg=CELL_HID, fg=TEXT_W, insertbackground=TEXT_W,
+                 relief="flat", font=("Courier",16), bd=8).pack(fill="x", pady=(4,0))
+        self._err_var = tk.StringVar()
+        tk.Label(frame, textvariable=self._err_var,
+                 bg=BG, fg=MINE_COL, font=("Courier",11)).pack(pady=(8,0))
+        make_label(frame, f"誕生シード: {self.seed:08X}",
+                   fg=TEXT_G, font=("Courier",9)).pack(anchor="w", pady=(8,0))
+        bf = tk.Frame(frame, bg=BG)
+        bf.pack(fill="x", pady=(24,0))
+        make_btn(bf, "◀  戻る", self.on_back).pack(side="left")
+        make_btn(bf, "育成開始 ▶", self._start_training,
+                 bg=SAFE_COL, fg=BG).pack(side="right")
+
+    def _validate_name(self, name):
+        import unicodedata
+        if not name: return "馬名を入力してください"
+        if len(name) > 8: return "馬名は8文字以内にしてください"
+        for ch in name:
+            if "KATAKANA" not in unicodedata.name(ch, "") and "MIDDLE DOT" not in unicodedata.name(ch, ""):
+                return f"カタカナで入力してください（'{ch}'は使用不可）"
+        return None
+
+    def _start_training(self):
+        name = self._name_var.get().strip()
+        err  = self._validate_name(name)
+        if err:
+            self._err_var.set(f"⚠ {err}")
+            return
+        self.name    = name
+        self.stats   = self._tr.generate_initial_stats(self.seed)
+        self.fatigue = 0
+        self.month   = 0
+        self.history = []
+        self._next_month()
+
+    # ── 月次育成 ──────────────────────────────
+    def _next_month(self):
+        if self.month >= self._tr.TRAINING_MONTHS:
+            self._show_complete()
+            return
+        self.choices = self._tr.get_monthly_choices(
+            self.month + 1, self.fatigue, self.seed, self.history)
+        self._build_training_screen()
+
+    def _draw_pentagon(self, canvas, stats, cx, cy, r):
+        """五角形レーダーチャート"""
+        import math
+        keys   = ["speed","stamina","corner","mental","adaptability"]
+        labels = ["速度","スタミナ","コーナー","精神力","適応力"]
+        n      = len(keys)
+        # 背景グリッド
+        for level in [0.25, 0.5, 0.75, 1.0]:
+            pts = []
+            for i in range(n):
+                angle = math.pi/2 + 2*math.pi*i/n
+                px = cx + r * level * math.cos(angle)
+                py = cy - r * level * math.sin(angle)
+                pts.extend([px, py])
+            canvas.create_polygon(pts, fill="", outline="#333355", width=1)
+        # 軸線
+        for i in range(n):
+            angle = math.pi/2 + 2*math.pi*i/n
+            canvas.create_line(cx, cy,
+                cx + r * math.cos(angle),
+                cy - r * math.sin(angle),
+                fill="#333355", width=1)
+        # ステータス多角形
+        pts = []
+        for i, key in enumerate(keys):
+            val   = stats.get(key, 0) / self._tr.STAT_MAX
+            angle = math.pi/2 + 2*math.pi*i/n
+            px    = cx + r * val * math.cos(angle)
+            py    = cy - r * val * math.sin(angle)
+            pts.extend([px, py])
+        canvas.create_polygon(pts, fill="#2244AA", outline=ACCENT_COL,
+                              width=2, stipple="gray50")
+        # 頂点ドット
+        for i, key in enumerate(keys):
+            val   = stats.get(key, 0) / self._tr.STAT_MAX
+            angle = math.pi/2 + 2*math.pi*i/n
+            px    = cx + r * val * math.cos(angle)
+            py    = cy - r * val * math.sin(angle)
+            canvas.create_oval(px-4, py-4, px+4, py+4,
+                               fill=ACCENT_COL, outline="")
+        # ラベル
+        for i, (key, lbl) in enumerate(zip(keys, labels)):
+            angle = math.pi/2 + 2*math.pi*i/n
+            lx    = cx + (r+22) * math.cos(angle)
+            ly    = cy - (r+22) * math.sin(angle)
+            stars = self._tr.to_stars(stats.get(key, 0))
+            canvas.create_text(lx, ly-6, text=lbl,
+                fill=TEXT_G, font=("Courier",9), anchor="center")
+            canvas.create_text(lx, ly+6, text=stars,
+                fill=FLAG_COL, font=("Courier",9), anchor="center")
+
+    def _build_training_screen(self):
+        for w in self.root.winfo_children(): w.destroy()
+        tr    = self._tr
+        month = self.month + 1
+
+        make_label(self.root, f"🐴 {self.name}  第{month}月  / 全12月",
+                   fg=ACCENT_COL, font=("Courier",16,"bold")).pack(pady=(16,4))
+
+        # 上部: グラフ + 右側情報
+        top = tk.Frame(self.root, bg=BG)
+        top.pack(fill="x", padx=28)
+
+        # 五角形グラフ
+        graph_size = 220
+        cv = tk.Canvas(top, width=graph_size, height=graph_size,
+                       bg=SIDEBAR_BG, highlightthickness=0)
+        cv.pack(side="left", padx=(0,16), pady=4)
+        self._draw_pentagon(cv, self.stats, graph_size//2, graph_size//2, 75)
+
+        # 右側: 疲労・全盛期・進捗
+        info = tk.Frame(top, bg=BG)
+        info.pack(side="left", fill="both", expand=True)
+
+        fat_col = MINE_COL if self.fatigue >= 60 else (FLAG_COL if self.fatigue >= 40 else SAFE_COL)
+        make_label(info, f"疲労: {self.fatigue}/100",
+                   fg=fat_col, font=("Courier",12,"bold")).pack(anchor="w")
+        peak = self.stats["peak_month"]
+        peak_col = SAFE_COL if month == peak else TEXT_G
+        peak_txt = "【全盛期！】" if month == peak else f"全盛期: 第{peak}月"
+        make_label(info, peak_txt, fg=peak_col,
+                   font=("Courier",11,"bold" if month==peak else "normal")).pack(anchor="w", pady=(4,0))
+
+        # 進捗ドット
+        prog = tk.Frame(info, bg=BG)
+        prog.pack(anchor="w", pady=(12,0))
+        for m in range(tr.TRAINING_MONTHS):
+            col = SAFE_COL if m < self.month else (ACCENT_COL if m == self.month else CELL_HID)
+            tk.Label(prog, text="●", bg=BG, fg=col,
+                     font=("Courier",11)).pack(side="left")
+
+        # メニュー
+        make_label(self.root, "今月のメニューを選んでください",
+                   fg=TEXT_W, font=("Courier",12,"bold")).pack(pady=(8,4))
+
+        for menu in self.choices:
+            ef   = menu["effects"]
+            parts = []
+            for k, v in ef.items():
+                lbl = tr.STAT_LABELS.get(k, k)
+                parts.append(f"{lbl}{'+'if v>0 else ''}{v}")
+            eff_str = "  ".join(parts)
+
+            mf = tk.Frame(self.root, bg=BTN_DARK,
+                          highlightbackground=CELL_BORDER, highlightthickness=1)
+            mf.pack(fill="x", padx=28, pady=3)
+            mf.configure(cursor="hand2")
+            tk.Label(mf, text=f"  {menu['label']}",
+                     bg=BTN_DARK, fg=TEXT_W,
+                     font=("Courier",13,"bold"), anchor="w").pack(fill="x", padx=8, pady=(6,0))
+            tk.Label(mf, text=f"  {menu['desc']}",
+                     bg=BTN_DARK, fg=TEXT_G,
+                     font=("Courier",10), anchor="w").pack(fill="x", padx=8)
+            tk.Label(mf, text=f"  効果: {eff_str}",
+                     bg=BTN_DARK, fg=ACCENT_COL,
+                     font=("Courier",9), anchor="w").pack(fill="x", padx=8, pady=(0,6))
+            mf.bind("<Button-1>", lambda e, m=menu: self._select_menu(m))
+            for child in mf.winfo_children():
+                child.bind("<Button-1>", lambda e, m=menu: self._select_menu(m))
+            mf.bind("<Enter>", lambda e, f=mf: f.configure(bg=BTN_DARK_H))
+            mf.bind("<Leave>", lambda e, f=mf: f.configure(bg=BTN_DARK))
+
+    def _select_menu(self, menu):
+        import random as _r
+        tr = self._tr
+        new_stats, new_fat, event = tr.apply_training(
+            self.stats, self.fatigue, menu["id"],
+            self.month + 1,
+            self.stats["growth_rate"],
+            self.stats["peak_month"]
+        )
+        self.stats   = new_stats
+        self.fatigue = new_fat
+        self.history.append(menu["id"])
+        self.month  += 1
+
+        # コーチメッセージ
+        coach_msg = tr.get_coach_message(menu["id"], _r)
+        self._show_coach_message(menu, coach_msg, event)
+
+    def _show_coach_message(self, menu, coach_msg, event):
+        for w in self.root.winfo_children(): w.destroy()
+        make_label(self.root, f"🐴 {self.name}  第{self.month}月 完了",
+                   fg=ACCENT_COL, font=("Courier",16,"bold")).pack(pady=(28,16))
+
+        # 通常コーチメッセージ
+        msg_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
+        msg_frame.pack(fill="x", padx=40, pady=(0,12))
+        make_label(msg_frame, "調教師:",
+                   fg=FLAG_COL, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(8,0))
+        make_label(msg_frame, f"「{coach_msg}」",
+                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20, pady=(0,8))
+
+        # イベントメッセージ
+        if event:
+            ev_frame = tk.Frame(self.root, bg="#1A0A00" if "アクシデント" in event["message_prefix"] else "#0A1A00")
+            ev_frame.pack(fill="x", padx=40, pady=(0,12))
+            make_label(ev_frame, event["message_prefix"],
+                       fg=MINE_COL if "アクシデント" in event["message_prefix"] else SAFE_COL,
+                       font=("Courier",12,"bold")).pack(anchor="w", padx=12, pady=(8,0))
+            make_label(ev_frame, event["message"],
+                       fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20)
+            if event.get("sub"):
+                make_label(ev_frame, event["sub"],
+                           fg=FLAG_COL, font=("Courier",10)).pack(anchor="w", padx=20, pady=(0,8))
+
+        bf = tk.Frame(self.root, bg=BG)
+        bf.pack(pady=(16,0))
+        if self.month >= self._tr.TRAINING_MONTHS:
+            make_btn(bf, "育成完了へ ▶", self._show_complete,
+                     bg=SAFE_COL, fg=BG).pack()
+        else:
+            make_btn(bf, f"第{self.month+1}月へ ▶", self._next_month,
+                     bg=SAFE_COL, fg=BG).pack()
+
+    # ── 育成完了 ──────────────────────────────
+    def _show_complete(self):
+        for w in self.root.winfo_children(): w.destroy()
+        tr = self._tr
+        traits = [t["name"] for t in tr.TRAITS if t["condition"](self.stats)]
+        self.stats["traits"] = traits
+        code    = tr.encode_horse_code(self.name, self.seed, self.history)
+        eval_msg = tr.get_completion_message(self.stats)
+
+        make_label(self.root, "🏆 育成完了！",
+                   fg=FLAG_COL, font=("Courier",22,"bold")).pack(pady=(20,4))
+        make_label(self.root, f"「{self.name}」が育成を終えました！",
+                   fg=TEXT_W, font=("Courier",13)).pack(pady=(0,12))
+
+        # 調教師の評価
+        ev_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
+        ev_frame.pack(fill="x", padx=40, pady=(0,12))
+        make_label(ev_frame, "調教師の評価:",
+                   fg=FLAG_COL, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(8,0))
+        for line in eval_msg.splitlines():
+            make_label(ev_frame, f"  {line}",
+                       fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20)
+        tk.Label(ev_frame, text="", bg=SIDEBAR_BG).pack(pady=4)
+
+        # 五角形グラフ（最終）
+        graph_size = 200
+        cv = tk.Canvas(self.root, width=graph_size, height=graph_size,
+                       bg=SIDEBAR_BG, highlightthickness=0)
+        cv.pack(pady=(0,8))
+        self._draw_pentagon(cv, self.stats, graph_size//2, graph_size//2, 68)
+
+        # 特性
+        if traits:
+            make_label(self.root, "✨ 特性: " + "  ".join(traits),
+                       fg=SAFE_COL, font=("Courier",12,"bold")).pack(pady=(0,8))
+
+        # コード
+        make_label(self.root, "馬コード（コピーして保存）:",
+                   fg=TEXT_G, font=("Courier",11)).pack(pady=(4,2))
+        code_var   = tk.StringVar(value=code)
+        code_entry = tk.Entry(self.root, textvariable=code_var, width=56,
+                              bg=CELL_HID, fg=SAFE_COL,
+                              relief="flat", font=("Courier",10), bd=6, state="readonly")
+        code_entry.pack(padx=40, pady=(0,4))
+        copy_lbl = tk.Label(self.root, text="", bg=BG, fg=SAFE_COL, font=("Courier",10))
+        copy_lbl.pack()
+
+        def copy_code():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            copy_lbl.config(text="✅ コピーしました！")
+            self.root.after(2000, lambda: copy_lbl.config(text=""))
+
+        bf = tk.Frame(self.root, bg=BG)
+        bf.pack(pady=(8,24))
+        make_btn(bf, "📋 コードをコピー", copy_code, bg=BTN_DARK).pack(side="left")
+        make_btn(bf, "◀  ロビーへ", self.on_back).pack(side="left", padx=(8,0))
+        make_btn(bf, "🏇  すぐレースへ", lambda: self._go_race(code),
+                 bg=SAFE_COL, fg=BG).pack(side="left", padx=(8,0))
+
+    def _go_race(self, code):
+        tr = self._tr
+        name, seed, history = tr.decode_horse_code(code)
+        trained    = tr.trained_to_race_horse(name, seed, history, 1, "芝")
+        vote_sec   = self.cfg.get("hr_vote_sec", 60)
+        race_count = int(self.cfg.get("hr_race_count", "3"))
+        self.on_race(self.cfg, vote_sec, race_count, trained)
+
+class CodeEntryScreen:
+    """最大8頭の育成馬コードを入力してレースに参加する画面"""
+    MAX_HORSES = 8
+
+    def __init__(self, root, cfg, on_back, on_race):
+        self.root       = root
+        self.cfg        = cfg
+        self.on_back    = on_back
+        self.on_race    = on_race
+        self._entries   = []   # (StringVar, frame) のリスト
+        self._parsed    = {}   # index → (name, seed, history) キャッシュ
+
+        root.title("ChatViewPlayGame - コードで参戦")
+        root.configure(bg=BG)
+
+        make_label(root, "📋 コードで参戦",
+                   fg=ACCENT_COL, font=("Courier",20,"bold")).pack(pady=(20,2))
+        make_label(root, "育成馬コードを入力（最大8頭・空欄はランダム馬で補完）",
+                   fg=TEXT_G, font=("Courier",10)).pack(pady=(0,10))
+
+        # スクロール可能なメインフレーム
+        outer = tk.Frame(root, bg=BG)
+        outer.pack(fill="both", expand=True, padx=28)
+
+        canvas_scroll = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        scrollbar     = tk.Scrollbar(outer, orient="vertical",
+                                     command=canvas_scroll.yview)
+        canvas_scroll.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas_scroll.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas_scroll, bg=BG)
+        canvas_scroll.create_window((0,0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas_scroll.configure(
+                       scrollregion=canvas_scroll.bbox("all")))
+
+        # 8枠分の入力フォーム
+        for i in range(self.MAX_HORSES):
+            row = tk.Frame(inner, bg=BG)
+            row.pack(fill="x", pady=3)
+
+            tk.Label(row, text=f"{i+1}番:",
+                     bg=BG, fg=HR_COLORS[i % len(HR_COLORS)],
+                     font=("Courier",11,"bold"), width=4).pack(side="left")
+
+            var = tk.StringVar()
+            entry = tk.Entry(row, textvariable=var, width=48,
+                             bg=CELL_HID, fg=SAFE_COL, insertbackground=TEXT_W,
+                             relief="flat", font=("Courier",10), bd=4)
+            entry.pack(side="left", padx=(4,8))
+
+            status_lbl = tk.Label(row, text="", bg=BG, fg=TEXT_G,
+                                  font=("Courier",9), width=20, anchor="w")
+            status_lbl.pack(side="left")
+
+            idx = i
+            var.trace_add("write", lambda *a, i=idx: self._on_code_change(i))
+            self._entries.append((var, status_lbl))
+
+        self._err_var = tk.StringVar()
+        tk.Label(inner, textvariable=self._err_var,
+                 bg=BG, fg=MINE_COL, font=("Courier",11)).pack(pady=(8,0))
+
+        bf = tk.Frame(root, bg=BG)
+        bf.pack(pady=(8,16))
+        make_btn(bf, "◀  戻る", self.on_back).pack(side="left")
+        make_btn(bf, "🏇  参戦する", self._go_race,
+                 bg=SAFE_COL, fg=BG).pack(side="left", padx=(12,0))
+
+    def _on_code_change(self, idx):
+        var, lbl = self._entries[idx]
+        code = var.get().strip()
+        if not code:
+            lbl.config(text="（ランダム馬）", fg=TEXT_G)
+            self._parsed.pop(idx, None)
+            return
+        try:
+            from training import decode_horse_code, replay_training
+            name, seed, history = decode_horse_code(code)
+            stats  = replay_training(seed, history)
+            traits = stats.get("traits", [])
+            self._parsed[idx] = (name, seed, history)
+            trait_str = f" [{traits[0]}]" if traits else ""
+            lbl.config(text=f"✅ {name}{trait_str}", fg=SAFE_COL)
+            self._err_var.set("")
+        except Exception as e:
+            self._parsed.pop(idx, None)
+            lbl.config(text="⚠ 無効なコード", fg=MINE_COL)
+
+    def _go_race(self):
+        from training import decode_horse_code, trained_to_race_horse
+        trained_list = []
+        for idx, (var, lbl) in enumerate(self._entries):
+            code = var.get().strip()
+            if not code:
+                continue
+            if idx not in self._parsed:
+                self._err_var.set(f"⚠ {idx+1}番のコードが無効です")
+                return
+            name, seed, history = self._parsed[idx]
+            horse = trained_to_race_horse(name, seed, history, idx+1, "芝")
+            trained_list.append(horse)
+
+        if not trained_list:
+            self._err_var.set("⚠ 少なくとも1頭のコードを入力してください")
+            return
+
+        vote_sec   = self.cfg.get("hr_vote_sec", 60)
+        race_count = int(self.cfg.get("hr_race_count", "3"))
+        # 複数馬の場合は先頭馬をtrained_horseとして渡し、リスト全体も渡す
+        self.on_race(self.cfg, vote_sec, race_count,
+                     trained_list[0], trained_list)
+
 class App:
     def __init__(self):
         self.root = tk.Tk()
@@ -3584,7 +4102,9 @@ class App:
         self._clear()
         HorseLobby(self.root, self.cfg,
                    on_start=self._start_horse,
-                   on_back=self._show_top_menu)
+                   on_back=self._show_top_menu,
+                   on_train=self._show_training,
+                   on_code=self._show_code_entry)
 
     def _start_horse(self, cfg, vote_sec, race_count=0):
         self.cfg = cfg
@@ -3596,6 +4116,26 @@ class App:
         self._clear()
         PaintScreen(self.root, self.cfg,
                     on_menu=self._show_top_menu)
+
+    def _show_training(self):
+        self._clear()
+        TrainingScreen(self.root, self.cfg,
+                       on_back=self._show_horse_lobby,
+                       on_race=self._start_horse_with_trained)
+
+    def _show_code_entry(self):
+        self._clear()
+        CodeEntryScreen(self.root, self.cfg,
+                        on_back=self._show_horse_lobby,
+                        on_race=self._start_horse_with_trained)
+
+    def _start_horse_with_trained(self, cfg, vote_sec, race_count, trained_horse, trained_list=None):
+        self.cfg = cfg
+        self._clear()
+        HorseRaceScreen(self.root, cfg, vote_sec, race_count,
+                        trained_horse=trained_horse,
+                        trained_list=trained_list,
+                        on_menu=self._show_top_menu)
 
 
 if __name__ == "__main__":
@@ -3611,4 +4151,8 @@ if __name__ == "__main__":
 
 # ══════════════════════════════════════════════
 #  ペイント画面
+# ══════════════════════════════════════════════
+
+# ══════════════════════════════════════════════
+#  育成画面
 # ══════════════════════════════════════════════
