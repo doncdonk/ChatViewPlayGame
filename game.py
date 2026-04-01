@@ -1853,6 +1853,160 @@ class ReversiGameScreen:
             c.create_text((cx1+cx2)//2, cy1+30,
                 text=self.hint_text[:32],
                 fill=TEXT_G, font=("Courier",8), tags="rv_sidebar")
+
+# ══════════════════════════════════════════════
+#  馬プロフィールモーダル（共通関数）
+# ══════════════════════════════════════════════
+def _modal_pos(pos, win_w, win_h, mw=520, mh=430):
+    if pos is not None:
+        mx, my = pos
+        return max(0, min(win_w-mw, mx)), max(0, min(win_h-mh, my))
+    return (win_w-mw)//2, (win_h-mh)//2
+
+
+def _modal_pentagon(canvas, h, cx, cy, r, tag):
+    import math
+    keys   = ["speed","stamina","corner","mental","adaptability"]
+    labels = ["速度","スタミナ","コーナー","精神力","適応力"]
+    n = 5
+    for level in [0.25,0.5,0.75,1.0]:
+        pts = []
+        for i in range(n):
+            a = math.pi/2 + 2*math.pi*i/n
+            pts.extend([cx+r*level*math.cos(a), cy-r*level*math.sin(a)])
+        canvas.create_polygon(pts, fill="", outline="#222244", width=1, tags=tag)
+    for i in range(n):
+        a = math.pi/2 + 2*math.pi*i/n
+        canvas.create_line(cx, cy, cx+r*math.cos(a), cy-r*math.sin(a),
+                           fill="#222244", width=1, tags=tag)
+    pts = []
+    for i, key in enumerate(keys):
+        val = h.get(key, 0) / 10.0
+        a   = math.pi/2 + 2*math.pi*i/n
+        pts.extend([cx+r*val*math.cos(a), cy-r*val*math.sin(a)])
+    col = HR_COLORS[(h.get("number",1)-1) % len(HR_COLORS)]
+    canvas.create_polygon(pts, fill=col, outline=col, width=2, tags=tag)
+    canvas.create_polygon(pts, fill="", outline=col, width=2, tags=tag)
+    for i, key in enumerate(keys):
+        val = h.get(key, 0) / 10.0
+        a   = math.pi/2 + 2*math.pi*i/n
+        px, py = cx+r*val*math.cos(a), cy-r*val*math.sin(a)
+        canvas.create_oval(px-4, py-4, px+4, py+4, fill=col, outline="", tags=tag)
+    for i, (key, lbl) in enumerate(zip(keys, labels)):
+        a  = math.pi/2 + 2*math.pi*i/n
+        lx = cx+(r+26)*math.cos(a)
+        ly = cy-(r+26)*math.sin(a)
+        sn = min(5, max(0, round(h.get(key,0)/2)))
+        canvas.create_text(lx, ly-7, text=lbl,
+            fill=TEXT_G, font=("Courier",9), anchor="center", tags=tag)
+        canvas.create_text(lx, ly+7, text="★"*sn+"☆"*(5-sn),
+            fill=FLAG_COL, font=("Courier",9), anchor="center", tags=tag)
+
+
+def draw_horse_modal(canvas, h, pos, win_w, win_h, odds=None, on_close=None):
+    tag = "hr_modal"
+    canvas.delete(tag)
+    mw, mh = 560, 460
+    mx, my = _modal_pos(pos, win_w, win_h, mw, mh)
+    col    = HR_COLORS[(h.get("number",1)-1) % len(HR_COLORS)]
+
+    # 背景（Canvasの bg=BG が暗幕代わり。stippleはWindowsで重いため省略）
+    # 本体
+    canvas.create_rectangle(mx, my, mx+mw, my+mh,
+        fill="#0D1025", outline=col, width=2, tags=tag)
+    # ヘッダー
+    canvas.create_rectangle(mx, my, mx+mw, my+44,
+        fill=BTN_DARK, outline="", tags=tag)
+    mark = "🐴 " if h.get("is_trained") else ""
+    canvas.create_text(mx+16, my+22,
+        text=f"{mark}{h.get('number','')}番  {h.get('name','')}",
+        fill=col, anchor="w", font=("Courier",14,"bold"), tags=tag)
+    canvas.create_text(mx+mw//2, my+22, text="⠿ ドラッグで移動",
+        fill=TEXT_G, anchor="center", font=("Courier",8), tags=tag)
+    # ×ボタン
+    canvas.create_rectangle(mx+mw-36, my+8, mx+mw-8, my+36,
+        fill="#2A1A1A", outline=MINE_COL, width=1, tags=tag)
+    canvas.create_text(mx+mw-22, my+22, text="×",
+        fill=MINE_COL, font=("Courier",13,"bold"), tags=tag)
+
+    # 五角形グラフ
+    _modal_pentagon(canvas, h, mx+100, my+175, 80, tag)
+
+    # 右側ステータス
+    rx, ry2 = mx+230, my+56
+    for lbl, key in [("速度","speed"),("スタミナ","stamina"),("コーナー","corner"),
+                     ("精神力","mental"),("適応力","adaptability")]:
+        val = h.get(key, 0)
+        sn  = min(5, max(0, round(val/2)))
+        canvas.create_text(rx, ry2, text=f"{lbl}:",
+            fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
+        canvas.create_text(rx+72, ry2, text="★"*sn+"☆"*(5-sn),
+            fill=FLAG_COL, anchor="w", font=("Courier",10), tags=tag)
+        ry2 += 20
+
+    ry2 += 4
+    apt_t = h.get("apt_turf","○")
+    apt_d = h.get("apt_dirt","○")
+    canvas.create_text(rx, ry2, text=f"芝:{apt_t}  ダート:{apt_d}",
+        fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
+    ry2 += 20
+    cond = h.get("condition","○")
+    cond_col = SAFE_COL if cond=="◎" else (FLAG_COL if cond=="○" else
+               (TEXT_G if cond=="△" else MINE_COL))
+    canvas.create_text(rx, ry2, text=f"調子: {cond}",
+        fill=cond_col, anchor="w", font=("Courier",11,"bold"), tags=tag)
+    ry2 += 20
+    if odds:
+        ov   = odds.get(h.get("number",0), 0.0)
+        ocol = MINE_COL if ov<3.0 else (FLAG_COL if ov<6.0 else SAFE_COL)
+        canvas.create_text(rx, ry2, text=f"オッズ: {ov:.1f}倍",
+            fill=ocol, anchor="w", font=("Courier",11,"bold"), tags=tag)
+        ry2 += 20
+    jock = h.get("jockey", {})
+    if jock:
+        jskl = "★"*jock.get("skill",0)+"☆"*(5-jock.get("skill",0))
+        canvas.create_text(rx, ry2, text=f"騎手: {jock.get('name','')}",
+            fill=TEXT_W, anchor="w", font=("Courier",10,"bold"), tags=tag)
+        ry2 += 17
+        canvas.create_text(rx, ry2, text=f"技術:{jskl}  {jock.get('style','')}",
+            fill=TEXT_G, anchor="w", font=("Courier",9), tags=tag)
+        ry2 += 17
+        aff = h.get("affinity","△")
+        ac  = SAFE_COL if aff=="◎" else (ACCENT_COL if aff=="○" else
+              (FLAG_COL if aff=="△" else MINE_COL))
+        canvas.create_text(rx, ry2, text=f"相性: {aff}",
+            fill=ac, anchor="w", font=("Courier",10,"bold"), tags=tag)
+
+    # 特性
+    traits = h.get("traits", [])
+    if traits:
+        try:
+            from training import COMBO_TRAITS as _CT
+            combo_names = {c["name"] for c in _CT}
+        except Exception:
+            combo_names = set()
+        base_t  = [t for t in traits if t not in combo_names]
+        combo_t = [t for t in traits if t in combo_names]
+        ty = my + mh - 80
+        canvas.create_line(mx+10, ty-6, mx+mw-10, ty-6,
+            fill=CELL_BORDER, width=1, tags=tag)
+        if base_t:
+            canvas.create_text(mx+16, ty, text="特性: "+"  ".join(base_t),
+                fill=TEXT_G, anchor="w", font=("Courier",10), tags=tag)
+            ty += 18
+        if combo_t:
+            canvas.create_text(mx+16, ty, text="✨ "+"  ".join(combo_t),
+                fill=FLAG_COL, anchor="w", font=("Courier",11,"bold"), tags=tag)
+            ty += 18
+
+    # コメント
+    cy_com = my + mh - 28
+    canvas.create_line(mx+10, cy_com-10, mx+mw-10, cy_com-10,
+        fill=CELL_BORDER, width=1, tags=tag)
+    canvas.create_text(mx+16, cy_com,
+        text=f"「{h.get('comment','')[:52]}」",
+        fill=FLAG_COL, anchor="w", font=("Courier",9), tags=tag)
+
 class HorseLobby:
     def __init__(self, root, cfg, on_start, on_back, on_train=None, on_code=None):
         self.root     = root
@@ -2068,12 +2222,19 @@ class HorseRaceScreen:
             ).start()
 
         root.bind("<space>", self._on_space)
-        self.canvas.bind("<Button-1>", self._on_canvas_click)
-        self.canvas.bind("<Motion>",   self._on_canvas_motion)
-        self.hover_horse   = None   # ホバー中の馬番号
-        self.my_vote       = None   # 配信者の投票番号（[配信者]）
-        self._vote_rects   = []     # [(num, x1,y1,x2,y2), ...]
-        self._result_btn   = None   # 結果画面ボタン座標
+        self.canvas.bind("<Button-1>",       self._on_canvas_click)
+        self.canvas.bind("<Motion>",           self._on_canvas_motion)
+        self.canvas.bind("<B1-Motion>",        self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>",  self._on_canvas_release)
+        self.hover_horse    = None
+        self.my_vote        = None
+        self._vote_rects    = []
+        self._detail_rects  = []    # [(num, x1,y1,x2,y2), ...] 詳細ボタン
+        self._result_btn    = None
+        self._modal_horse     = None
+        self._modal_horse_pos = None  # モーダル左上座標 (mx,my)
+        self._modal_close     = None
+        self._modal_drag      = None  # ドラッグ開始時の (mouse_x,mouse_y,modal_x,modal_y)
         self._final_btn    = None   # 最終結果ボタン座標
         self._transitioning = False  # 遷移中フラグ（2重防止）
         self.auto_next_sec  = float(cfg.get("hr_auto_next", 0))
@@ -2112,7 +2273,77 @@ class HorseRaceScreen:
 
         self._update_phase(dt)
         self._draw()
+        if getattr(self, "_modal_horse", None) is not None:
+            self._draw_profile_modal()
         self.root.after(1000 // HR_FPS, self._loop)
+
+    def _draw_profile_modal(self):
+        """馬プロフィールモーダルをCanvas最前面に描画"""
+        h   = self._modal_horse
+        if h is None:
+            return
+        draw_horse_modal(self.canvas, h, self._modal_horse_pos,
+                         self.win_w, self.win_h, self.odds,
+                         on_close=self._close_modal)
+        self._modal_close = getattr(self, "_modal_close", None)
+
+    def _close_modal(self):
+        self._modal_horse     = None
+        self._modal_horse_pos = None
+        self._modal_drag      = None
+
+    def _draw_modal_pentagon(self, canvas, h, cx, cy, r, tag):
+        """モーダル用五角形レーダーチャート"""
+        import math
+        keys   = ["speed","stamina","corner","mental","adaptability"]
+        labels = ["速度","スタミナ","コーナー","精神力","適応力"]
+        n      = len(keys)
+        # 最大値（1〜10スケール）
+        max_val = 10.0
+
+        # グリッド
+        for level in [0.25, 0.5, 0.75, 1.0]:
+            pts = []
+            for i in range(n):
+                angle = math.pi/2 + 2*math.pi*i/n
+                pts.extend([cx + r*level*math.cos(angle),
+                             cy - r*level*math.sin(angle)])
+            canvas.create_polygon(pts, fill="", outline="#222244", width=1, tags=tag)
+        # 軸線
+        for i in range(n):
+            angle = math.pi/2 + 2*math.pi*i/n
+            canvas.create_line(cx, cy,
+                cx+r*math.cos(angle), cy-r*math.sin(angle),
+                fill="#222244", width=1, tags=tag)
+        # ステータス多角形
+        pts = []
+        for i, key in enumerate(keys):
+            val   = h.get(key, 0) / max_val
+            angle = math.pi/2 + 2*math.pi*i/n
+            pts.extend([cx+r*val*math.cos(angle), cy-r*val*math.sin(angle)])
+        col = HR_COLORS[(h["number"]-1) % len(HR_COLORS)]
+        canvas.create_polygon(pts, fill=col, outline=col,
+                              width=2, tags=tag)
+        canvas.create_polygon(pts, fill="", outline=col, width=2, tags=tag)
+        # 頂点ドット
+        for i, key in enumerate(keys):
+            val   = h.get(key, 0) / max_val
+            angle = math.pi/2 + 2*math.pi*i/n
+            px    = cx+r*val*math.cos(angle)
+            py    = cy-r*val*math.sin(angle)
+            canvas.create_oval(px-4, py-4, px+4, py+4,
+                               fill=col, outline="", tags=tag)
+        # ラベル＋星
+        for i, (key, lbl) in enumerate(zip(keys, labels)):
+            angle = math.pi/2 + 2*math.pi*i/n
+            lx    = cx+(r+24)*math.cos(angle)
+            ly    = cy-(r+24)*math.sin(angle)
+            stars_n = min(5, max(0, round(h.get(key,0)/2)))
+            stars   = "★"*stars_n+"☆"*(5-stars_n)
+            canvas.create_text(lx, ly-7, text=lbl,
+                fill=TEXT_G, font=("Courier",9), anchor="center", tags=tag)
+            canvas.create_text(lx, ly+6, text=stars,
+                fill=FLAG_COL, font=("Courier",9), anchor="center", tags=tag)
 
     def _update_phase(self, dt):
         if self.phase == "vote":
@@ -2280,6 +2511,33 @@ class HorseRaceScreen:
             self._end_vote()
 
     def _on_canvas_click(self, ev):
+        # モーダル表示中の処理
+        if self._modal_horse is not None:
+            mx, my = _modal_pos(self._modal_horse_pos, self.win_w, self.win_h)
+            mw, mh = 560, 460
+            # ×ボタン
+            cx1,cy1,cx2,cy2 = mx+mw-36, my+8, mx+mw-8, my+36
+            if cx1<=ev.x<=cx2 and cy1<=ev.y<=cy2:
+                self._close_modal()
+                return
+            # ヘッダー内（×以外）→ ドラッグ開始
+            if mx<=ev.x<=mx+mw and my<=ev.y<=my+44:
+                self._modal_drag = (ev.x, ev.y, mx, my)
+                return
+            # モーダル外クリックで閉じる
+            if not (mx<=ev.x<=mx+mw and my<=ev.y<=my+mh):
+                self._close_modal()
+            return
+
+        # 詳細ボタン（投票フェーズ）
+        if self.phase == "vote":
+            for num, x1, y1, x2, y2 in self._detail_rects:
+                if x1<=ev.x<=x2 and y1<=ev.y<=y2:
+                    h = next((h for h in self.horses if h["number"]==num), None)
+                    if h:
+                        self._modal_horse = h
+                    return
+
         # メニューボタン（全フェーズ共通）
         bx = self.win_w - 116
         if bx <= ev.x <= bx+108 and 6 <= ev.y <= 36:
@@ -2308,6 +2566,13 @@ class HorseRaceScreen:
                     return
         # 結果画面は _draw_result 内で bind するため不要
 
+    def _on_canvas_drag(self, ev):
+        """B1-Motion: ドラッグ中の処理"""
+        if self._modal_drag is not None:
+            ox, oy, bmx, bmy = self._modal_drag
+            self._modal_horse_pos = (bmx + ev.x - ox, bmy + ev.y - oy)
+            # throttle: 50ms以内は再描画しない（_loop が次フレームで描画する）
+
     def _on_canvas_motion(self, ev):
         if self.phase != "vote":
             self.hover_horse = None
@@ -2317,6 +2582,12 @@ class HorseRaceScreen:
                 self.hover_horse = num
                 return
         self.hover_horse = None
+
+    def _on_canvas_release(self, ev):
+        if self._modal_drag is not None:
+            ox, oy, bmx, bmy = self._modal_drag
+            self._modal_horse_pos = (bmx + ev.x - ox, bmy + ev.y - oy)
+            self._modal_drag = None
 
     def _do_vote(self, username, num):
         """投票処理（チャット・クリック共通）"""
@@ -2408,7 +2679,7 @@ class HorseRaceScreen:
             fill=BTN_MENU, outline=CELL_BORDER, tags=tag)
         c.create_text(bx+54,21, text="◀ メニュー",
             fill=TEXT_W, font=("Courier",11,"bold"), tags=tag)
-        self.canvas.tag_bind(tag, "<Button-1>", self._check_menu_click)
+        # メニューボタンの判定は _on_canvas_click で行う（tag_bindは使わない）
 
     def _check_menu_click(self, ev):
         bx = self.win_w - 116
@@ -2453,7 +2724,8 @@ class HorseRaceScreen:
         row_h = (self.win_h - y - 56) // n
         row_h = min(row_h, 82)
 
-        self._vote_rects = []
+        self._vote_rects   = []
+        self._detail_rects = []
         for i, h in enumerate(self.horses):
             ry       = y + i * row_h
             col      = HR_COLORS[(h["number"]-1) % len(HR_COLORS)]
@@ -2463,8 +2735,8 @@ class HorseRaceScreen:
             odds_val = self.odds.get(h["number"], 0.0)
             half     = row_h // 2
 
-            # クリック領域（馬カラム全体）
-            self._vote_rects.append((h["number"], 2, ry, HR_HORSE_W-2, ry+row_h-2))
+            # クリック領域（詳細ボタン分を除いた左側）
+            self._vote_rects.append((h["number"], 2, ry, HR_HORSE_W-36, ry+row_h-2))
 
             # ── 馬情報カラム背景 ──
             if is_voted:
@@ -2498,7 +2770,7 @@ class HorseRaceScreen:
 
             # 一言評価（枠内折り返し）
             comment  = h.get("comment","")
-            max_c    = (HR_HORSE_W - 30) // 7   # 7px/文字で概算
+            max_c    = (HR_HORSE_W - 50) // 7
             line1    = comment[:max_c]
             line2    = comment[max_c:max_c*2]
             txt_y    = ry + min(42, row_h - 34)
@@ -2511,6 +2783,19 @@ class HorseRaceScreen:
                     text=line2,
                     fill=FLAG_COL, anchor="nw",
                     font=("Courier",9), tags=tag)
+
+            # 「詳」ボタン（馬カラム右下）
+            dbx1 = HR_HORSE_W - 32
+            dbx2 = HR_HORSE_W - 4
+            dby1 = ry + row_h - 24
+            dby2 = ry + row_h - 4
+            db_tag = f"detail_{h['number']}"
+            c.create_rectangle(dbx1, dby1, dbx2, dby2,
+                fill=BTN_DARK_H, outline=ACCENT_COL, width=1, tags=(tag, db_tag))
+            c.create_text((dbx1+dbx2)//2, (dby1+dby2)//2,
+                text="詳", fill=ACCENT_COL,
+                font=("Courier",9,"bold"), tags=(tag, db_tag))
+            self._detail_rects.append((h["number"], dbx1, dby1, dbx2, dby2))
 
             # オッズ（馬カラム右上）
             odds_col = MINE_COL if odds_val < 3.0 else (FLAG_COL if odds_val < 6.0 else SAFE_COL)
@@ -3184,6 +3469,9 @@ class HorseRaceScreen:
         self._vote_rects  = []
         self._goal_particles  = []
         self._goal_triggered  = False
+        self._modal_horse     = None
+        self._modal_close     = None
+        self._detail_rects    = []
         # ゴール演出キャッシュをクリア（次レースの勝ち馬に備える）
         if hasattr(self, "_goal_big_img"):
             del self._goal_big_img
@@ -3710,7 +3998,7 @@ class TrainingScreen:
             py    = cy - r * val * math.sin(angle)
             pts.extend([px, py])
         canvas.create_polygon(pts, fill="#2244AA", outline=ACCENT_COL,
-                              width=2, stipple="gray50")
+                              width=2)
         # 頂点ドット
         for i, key in enumerate(keys):
             val   = stats.get(key, 0) / self._tr.STAT_MAX
@@ -3858,10 +4146,14 @@ class TrainingScreen:
     def _show_complete(self):
         for w in self.root.winfo_children(): w.destroy()
         tr = self._tr
-        traits = [t["name"] for t in tr.TRAITS if t["condition"](self.stats)]
+        traits = tr.determine_traits(self.stats)
         self.stats["traits"] = traits
-        code    = tr.encode_horse_code(self.name, self.seed, self.history)
+        code     = tr.encode_horse_code(self.name, self.seed, self.history)
         eval_msg = tr.get_completion_message(self.stats)
+        # コンボ特性を分けて表示用に取得
+        single_names = {t["name"] for t in tr.TRAITS}
+        combo_traits  = [t for t in traits if t not in single_names]
+        base_traits   = [t for t in traits if t in single_names]
 
         make_label(self.root, "🏆 育成完了！",
                    fg=FLAG_COL, font=("Courier",22,"bold")).pack(pady=(20,4))
@@ -3885,10 +4177,15 @@ class TrainingScreen:
         cv.pack(pady=(0,8))
         self._draw_pentagon(cv, self.stats, graph_size//2, graph_size//2, 68)
 
-        # 特性
-        if traits:
-            make_label(self.root, "✨ 特性: " + "  ".join(traits),
-                       fg=SAFE_COL, font=("Courier",12,"bold")).pack(pady=(0,8))
+        # 特性表示（単体 + コンボ）
+        if base_traits:
+            make_label(self.root, "特性: " + "  ".join(base_traits),
+                       fg=TEXT_G, font=("Courier",11)).pack(pady=(0,2))
+        if combo_traits:
+            make_label(self.root, "✨ コンボ: " + "  ".join(combo_traits),
+                       fg=FLAG_COL, font=("Courier",12,"bold")).pack(pady=(0,8))
+        elif base_traits:
+            tk.Label(self.root, text="", bg=BG).pack(pady=4)
 
         # コード
         make_label(self.root, "馬コード（コピーして保存）:",
@@ -3931,8 +4228,16 @@ class CodeEntryScreen:
         self.cfg        = cfg
         self.on_back    = on_back
         self.on_race    = on_race
-        self._entries   = []   # (StringVar, frame) のリスト
-        self._parsed    = {}   # index → (name, seed, history) キャッシュ
+        self._entries   = []
+        self._parsed    = {}
+        self._modal_cv  = None
+        self._modal_horse     = None
+        self._modal_horse_pos = None
+        self._modal_drag      = None
+        self._modal_last_draw = 0.0
+
+        res_name = cfg.get("resolution", DEFAULT_RES)
+        self.win_w, self.win_h = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
 
         root.title("ChatViewPlayGame - コードで参戦")
         root.configure(bg=BG)
@@ -3942,48 +4247,36 @@ class CodeEntryScreen:
         make_label(root, "育成馬コードを入力（最大8頭・空欄はランダム馬で補完）",
                    fg=TEXT_G, font=("Courier",10)).pack(pady=(0,10))
 
-        # スクロール可能なメインフレーム
-        outer = tk.Frame(root, bg=BG)
-        outer.pack(fill="both", expand=True, padx=28)
+        inner = tk.Frame(root, bg=BG)
+        inner.pack(fill="both", expand=True, padx=28)
 
-        canvas_scroll = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        scrollbar     = tk.Scrollbar(outer, orient="vertical",
-                                     command=canvas_scroll.yview)
-        canvas_scroll.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas_scroll.pack(side="left", fill="both", expand=True)
-
-        inner = tk.Frame(canvas_scroll, bg=BG)
-        canvas_scroll.create_window((0,0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda e: canvas_scroll.configure(
-                       scrollregion=canvas_scroll.bbox("all")))
-
-        # 8枠分の入力フォーム
         for i in range(self.MAX_HORSES):
             row = tk.Frame(inner, bg=BG)
             row.pack(fill="x", pady=3)
-
             tk.Label(row, text=f"{i+1}番:",
                      bg=BG, fg=HR_COLORS[i % len(HR_COLORS)],
                      font=("Courier",11,"bold"), width=4).pack(side="left")
-
             var = tk.StringVar()
-            entry = tk.Entry(row, textvariable=var, width=48,
-                             bg=CELL_HID, fg=SAFE_COL, insertbackground=TEXT_W,
-                             relief="flat", font=("Courier",10), bd=4)
-            entry.pack(side="left", padx=(4,8))
-
+            tk.Entry(row, textvariable=var, width=44,
+                     bg=CELL_HID, fg=SAFE_COL, insertbackground=TEXT_W,
+                     relief="flat", font=("Courier",10), bd=4).pack(side="left", padx=(4,4))
             status_lbl = tk.Label(row, text="", bg=BG, fg=TEXT_G,
-                                  font=("Courier",9), width=20, anchor="w")
+                                   font=("Courier",9), width=18, anchor="w")
             status_lbl.pack(side="left")
-
             idx = i
+            detail_btn = tk.Button(row, text="詳細",
+                                   bg=BTN_DARK, fg=TEXT_G,
+                                   activebackground=ACCENT_COL, activeforeground=BG,
+                                   relief="groove", bd=1,
+                                   font=("Courier",9,"bold"),
+                                   state="disabled", cursor="hand2",
+                                   command=lambda i=idx: self._show_profile(i))
+            detail_btn.pack(side="left", padx=(2,0))
             var.trace_add("write", lambda *a, i=idx: self._on_code_change(i))
-            self._entries.append((var, status_lbl))
+            self._entries.append((var, status_lbl, detail_btn))
 
         self._err_var = tk.StringVar()
-        tk.Label(inner, textvariable=self._err_var,
+        tk.Label(root, textvariable=self._err_var,
                  bg=BG, fg=MINE_COL, font=("Courier",11)).pack(pady=(8,0))
 
         bf = tk.Frame(root, bg=BG)
@@ -3993,10 +4286,11 @@ class CodeEntryScreen:
                  bg=SAFE_COL, fg=BG).pack(side="left", padx=(12,0))
 
     def _on_code_change(self, idx):
-        var, lbl = self._entries[idx]
+        var, lbl, btn = self._entries[idx]
         code = var.get().strip()
         if not code:
             lbl.config(text="（ランダム馬）", fg=TEXT_G)
+            btn.config(state="disabled", bg=BTN_DARK, fg=TEXT_G)
             self._parsed.pop(idx, None)
             return
         try:
@@ -4004,37 +4298,267 @@ class CodeEntryScreen:
             name, seed, history = decode_horse_code(code)
             stats  = replay_training(seed, history)
             traits = stats.get("traits", [])
-            self._parsed[idx] = (name, seed, history)
-            trait_str = f" [{traits[0]}]" if traits else ""
+            self._parsed[idx] = (name, seed, history, stats)
+            from training import COMBO_TRAITS as _CT
+            combo_names = {c["name"] for c in _CT}
+            combos = [t for t in traits if t in combo_names]
+            trait_str = f" [{'・'.join(combos[:2])}]" if combos else (
+                        f" [{traits[0]}]" if traits else "")
             lbl.config(text=f"✅ {name}{trait_str}", fg=SAFE_COL)
+            btn.config(state="normal", bg=ACCENT_COL, fg=BG,
+                       activebackground=BTN_DARK_H, activeforeground=TEXT_W)
             self._err_var.set("")
-        except Exception as e:
+        except Exception:
             self._parsed.pop(idx, None)
             lbl.config(text="⚠ 無効なコード", fg=MINE_COL)
+            btn.config(state="disabled", bg=BTN_DARK, fg=TEXT_G)
+
+    def _show_profile(self, idx):
+        """モーダルCanvasをモーダルサイズ分だけ生成して馬プロフィールを表示"""
+        if idx not in self._parsed:
+            return
+        data  = self._parsed[idx]
+        stats = data[3] if len(data) > 3 else None
+        if stats is None:
+            from training import replay_training
+            stats = replay_training(data[1], data[2])
+
+        # コメント生成
+        comment = ""
+        try:
+            from horserace import make_comment
+            import random as _r
+            surface = _r.choice(["芝", "ダート"])
+            horse_tmp = {
+                "speed":        min(10, max(1, round(stats.get("speed",   50)/10))),
+                "stamina":      min(10, max(1, round(stats.get("stamina", 50)/10))),
+                "corner":       min(10, max(1, round(stats.get("corner",  50)/10))),
+                "mental":       min(10, max(1, round(stats.get("mental",  50)/10))),
+                "adaptability": min(10, max(1, round(stats.get("adaptability",50)/10))),
+                "apt_turf":     stats.get("apt_turf","○"),
+                "apt_dirt":     stats.get("apt_dirt","○"),
+                "condition":    "○",
+                "cond_mult":    1.0,
+                "jockey":       {"skill":3,"style":"先行"},
+                "affinity":     "○",
+                "aff_mult":     1.0,
+                "traits":       stats.get("traits",[]),
+            }
+            comment = make_comment(horse_tmp, surface, 2000)
+        except Exception:
+            pass
+
+        horse = {
+            "number":       idx + 1,
+            "name":         data[0],
+            "speed":        min(10, max(1, round(stats.get("speed",   50)/10))),
+            "stamina":      min(10, max(1, round(stats.get("stamina", 50)/10))),
+            "corner":       min(10, max(1, round(stats.get("corner",  50)/10))),
+            "mental":       min(10, max(1, round(stats.get("mental",  50)/10))),
+            "adaptability": min(10, max(1, round(stats.get("adaptability",50)/10))),
+            "apt_turf":     stats.get("apt_turf","○"),
+            "apt_dirt":     stats.get("apt_dirt","○"),
+            "condition":    "○",
+            "traits":       stats.get("traits", []),
+            "is_trained":   True,
+            "comment":      comment,
+        }
+        self._modal_horse     = horse
+        self._modal_horse_pos = None
+        self._modal_drag      = None
+
+        # 既存のモーダルCanvasがあれば破棄
+        if self._modal_cv is not None:
+            try: self._modal_cv.destroy()
+            except Exception: pass
+            self._modal_cv = None
+
+        # ── Canvas をモーダルサイズ分だけ生成して中央に配置 ──
+        # 全画面Canvasにすると他ウィジェットを覆いフリーズするため
+        mw, mh   = 560, 460
+        px = max(0, (self.win_w - mw) // 2)
+        py = max(0, (self.win_h - mh) // 2)
+        cv = tk.Canvas(self.root, width=mw, height=mh,
+                       bg="#0D1025", highlightthickness=0)
+        cv.place(x=px, y=py)
+        self._modal_cv = cv
+        self._modal_px = px
+        self._modal_py = py
+
+        cv.bind("<Button-1>",        self._modal_click)
+        cv.bind("<B1-Motion>",       self._modal_b1motion)
+        cv.bind("<ButtonRelease-1>", self._modal_release)
+
+        # モーダルサイズのCanvas内に直接描画（座標はCanvas内相対）
+        self._draw_modal_on_cv(cv, horse, mw, mh)
+
+    def _draw_modal_on_cv(self, cv, h, mw, mh):
+        """Canvas内（0,0起点）にモーダルを描画"""
+        import math
+        cv.delete("all")
+        col = HR_COLORS[(h.get("number",1)-1) % len(HR_COLORS)]
+
+        # 外枠
+        cv.create_rectangle(0, 0, mw-1, mh-1, fill="", outline=col, width=2)
+        # ヘッダー
+        cv.create_rectangle(0, 0, mw, 44, fill=BTN_DARK, outline="")
+        mark = "🐴 " if h.get("is_trained") else ""
+        cv.create_text(16, 22,
+            text=f"{mark}{h.get('number','')}番  {h.get('name','')}",
+            fill=col, anchor="w", font=("Courier",14,"bold"))
+        cv.create_text(mw//2, 22, text="⠿ ドラッグで移動",
+            fill=TEXT_G, anchor="center", font=("Courier",8))
+        # ×ボタン
+        cv.create_rectangle(mw-36, 8, mw-8, 36,
+            fill="#2A1A1A", outline=MINE_COL, width=1)
+        cv.create_text(mw-22, 22, text="×",
+            fill=MINE_COL, font=("Courier",13,"bold"))
+
+        # 五角形グラフ（Canvas内座標）
+        keys   = ["speed","stamina","corner","mental","adaptability"]
+        labels = ["速度","スタミナ","コーナー","精神力","適応力"]
+        cx_g, cy_g, r = 110, 195, 85
+        for level in [0.25,0.5,0.75,1.0]:
+            pts = []
+            for i in range(5):
+                a = math.pi/2 + 2*math.pi*i/5
+                pts.extend([cx_g+r*level*math.cos(a), cy_g-r*level*math.sin(a)])
+            cv.create_polygon(pts, fill="", outline="#222244", width=1)
+        for i in range(5):
+            a = math.pi/2 + 2*math.pi*i/5
+            cv.create_line(cx_g, cy_g, cx_g+r*math.cos(a), cy_g-r*math.sin(a),
+                           fill="#222244", width=1)
+        pts = []
+        for i, key in enumerate(keys):
+            val = h.get(key, 0) / 10.0
+            a   = math.pi/2 + 2*math.pi*i/5
+            pts.extend([cx_g+r*val*math.cos(a), cy_g-r*val*math.sin(a)])
+        cv.create_polygon(pts, fill=col, outline=col, width=2)
+        cv.create_polygon(pts, fill="", outline=col, width=2)
+        for i, key in enumerate(keys):
+            val = h.get(key, 0) / 10.0
+            a   = math.pi/2 + 2*math.pi*i/5
+            px2, py2 = cx_g+r*val*math.cos(a), cy_g-r*val*math.sin(a)
+            cv.create_oval(px2-4, py2-4, px2+4, py2+4, fill=col, outline="")
+        for i, (key, lbl) in enumerate(zip(keys, labels)):
+            a  = math.pi/2 + 2*math.pi*i/5
+            lx = cx_g+(r+26)*math.cos(a)
+            ly = cy_g-(r+26)*math.sin(a)
+            sn = min(5, max(0, round(h.get(key,0)/2)))
+            cv.create_text(lx, ly-7, text=lbl,
+                fill=TEXT_G, font=("Courier",9), anchor="center")
+            cv.create_text(lx, ly+7, text="★"*sn+"☆"*(5-sn),
+                fill=FLAG_COL, font=("Courier",9), anchor="center")
+
+        # 右側ステータス
+        rx, ry2 = 240, 56
+        for lbl, key in [("速度","speed"),("スタミナ","stamina"),("コーナー","corner"),
+                         ("精神力","mental"),("適応力","adaptability")]:
+            val = h.get(key, 0)
+            sn  = min(5, max(0, round(val/2)))
+            cv.create_text(rx, ry2, text=f"{lbl}:",
+                fill=TEXT_G, anchor="w", font=("Courier",10))
+            cv.create_text(rx+80, ry2, text="★"*sn+"☆"*(5-sn),
+                fill=FLAG_COL, anchor="w", font=("Courier",10))
+            ry2 += 22
+        ry2 += 4
+        apt_t = h.get("apt_turf","○")
+        apt_d = h.get("apt_dirt","○")
+        cv.create_text(rx, ry2, text=f"芝:{apt_t}  ダート:{apt_d}",
+            fill=TEXT_G, anchor="w", font=("Courier",10))
+        ry2 += 22
+        cond = h.get("condition","○")
+        cond_col = SAFE_COL if cond=="◎" else (FLAG_COL if cond=="○" else
+                   (TEXT_G if cond=="△" else MINE_COL))
+        cv.create_text(rx, ry2, text=f"調子: {cond}",
+            fill=cond_col, anchor="w", font=("Courier",11,"bold"))
+
+        # 特性
+        traits = h.get("traits", [])
+        if traits:
+            try:
+                from training import COMBO_TRAITS as _CT
+                combo_names = {c["name"] for c in _CT}
+            except Exception:
+                combo_names = set()
+            base_t  = [t for t in traits if t not in combo_names]
+            combo_t = [t for t in traits if t in combo_names]
+            ty = mh - 80
+            cv.create_line(10, ty-6, mw-10, ty-6, fill=CELL_BORDER, width=1)
+            if base_t:
+                cv.create_text(16, ty, text="特性: "+"  ".join(base_t),
+                    fill=TEXT_G, anchor="w", font=("Courier",10))
+                ty += 18
+            if combo_t:
+                cv.create_text(16, ty, text="✨ "+"  ".join(combo_t),
+                    fill=FLAG_COL, anchor="w", font=("Courier",11,"bold"))
+
+        # コメント
+        cy_com = mh - 24
+        cv.create_line(10, cy_com-12, mw-10, cy_com-12, fill=CELL_BORDER, width=1)
+        comment = h.get("comment","")
+        cv.create_text(16, cy_com, text=f"「{comment[:52]}」" if comment else "（コメントなし）",
+            fill=FLAG_COL, anchor="w", font=("Courier",9))
+
+    def _modal_click(self, ev):
+        mw, mh = 560, 460
+        # ×ボタン（Canvas内座標）
+        if mw-36<=ev.x<=mw-8 and 8<=ev.y<=36:
+            self._close_modal()
+            return
+        # ヘッダー内（×以外）でドラッグ開始
+        if ev.x <= mw-36 and ev.y <= 44:
+            px = getattr(self, "_modal_px", 0)
+            py = getattr(self, "_modal_py", 0)
+            self._modal_drag = (ev.x, ev.y, px, py)
+
+    def _modal_b1motion(self, ev):
+        if self._modal_drag is None or self._modal_cv is None:
+            return
+        ox, oy, bpx, bpy = self._modal_drag
+        mw, mh = 560, 460
+        new_px = max(0, min(self.win_w - mw, bpx + ev.x - ox))
+        new_py = max(0, min(self.win_h - mh, bpy + ev.y - oy))
+        self._modal_px = new_px
+        self._modal_py = new_py
+        # place() はCanvas中身を再描画しないので毎回呼んでよい
+        self._modal_cv.place(x=new_px, y=new_py)
+
+    def _modal_release(self, ev):
+        self._modal_drag = None
+
+    def _close_modal(self):
+        self._modal_horse     = None
+        self._modal_horse_pos = None
+        self._modal_drag      = None
+        if self._modal_cv is not None:
+            try: self._modal_cv.destroy()
+            except Exception: pass
+            self._modal_cv = None
 
     def _go_race(self):
         from training import decode_horse_code, trained_to_race_horse
         trained_list = []
-        for idx, (var, lbl) in enumerate(self._entries):
+        for idx, (var, lbl, btn) in enumerate(self._entries):
             code = var.get().strip()
             if not code:
                 continue
             if idx not in self._parsed:
                 self._err_var.set(f"⚠ {idx+1}番のコードが無効です")
                 return
-            name, seed, history = self._parsed[idx]
+            data = self._parsed[idx]
+            name, seed, history = data[0], data[1], data[2]
             horse = trained_to_race_horse(name, seed, history, idx+1, "芝")
             trained_list.append(horse)
-
         if not trained_list:
             self._err_var.set("⚠ 少なくとも1頭のコードを入力してください")
             return
-
+        self._close_modal()
         vote_sec   = self.cfg.get("hr_vote_sec", 60)
         race_count = int(self.cfg.get("hr_race_count", "3"))
-        # 複数馬の場合は先頭馬をtrained_horseとして渡し、リスト全体も渡す
         self.on_race(self.cfg, vote_sec, race_count,
                      trained_list[0], trained_list)
+
 
 class App:
     def __init__(self):
@@ -4156,3 +4680,5 @@ if __name__ == "__main__":
 # ══════════════════════════════════════════════
 #  育成画面
 # ══════════════════════════════════════════════
+
+

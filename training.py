@@ -169,16 +169,89 @@ def _apply_breakthrough(stats, rng):
 def _apply_recovery(stats, rng):
     return stats, "疲労がすっきり回復した！"
 
-# ── 特性定義 ──────────────────────────────────────────
+# ── 特性定義（能力値系・コース系・育成ルート系） ────────
+# condition引数: stats dict（history・fatigue含む）
 TRAITS = [
-    {"id": 0, "name": "快速型",      "condition": lambda s: s["speed"] >= 80},
-    {"id": 1, "name": "鉄人",        "condition": lambda s: s["stamina"] >= 80},
-    {"id": 2, "name": "コーナー巧者","condition": lambda s: s["corner"] >= 80},
-    {"id": 3, "name": "精神力",      "condition": lambda s: s["mental"] >= 80},
-    {"id": 4, "name": "万能型",      "condition": lambda s: all(s[k] >= 60 for k in ["speed","stamina","corner","mental","adaptability"])},
-    {"id": 5, "name": "芝巧者",      "condition": lambda s: s.get("apt_turf") == "◎"},
-    {"id": 6, "name": "ダート巧者",  "condition": lambda s: s.get("apt_dirt") == "◎"},
-    {"id": 7, "name": "鬼神",        "condition": lambda s: s["speed"] >= 90 and s["stamina"] >= 90},
+    # ── 能力値系（単体） ──────────────────────────
+    {"id":  0, "name": "快速型",      "condition": lambda s: s["speed"] >= 80},
+    {"id":  1, "name": "鉄人",        "condition": lambda s: s["stamina"] >= 80},
+    {"id":  2, "name": "コーナー巧者","condition": lambda s: s["corner"] >= 80},
+    {"id":  3, "name": "精神力",      "condition": lambda s: s["mental"] >= 80},
+    {"id":  4, "name": "万能型",      "condition": lambda s: all(s[k] >= 60 for k in ["speed","stamina","corner","mental","adaptability"])},
+    {"id":  5, "name": "鬼神",        "condition": lambda s: s["speed"] >= 90 and s["stamina"] >= 90},
+    {"id":  6, "name": "瞬足",        "condition": lambda s: s["speed"] >= 92},
+    {"id":  7, "name": "不屈",        "condition": lambda s: s["stamina"] >= 92},
+    {"id":  8, "name": "堅実派",      "condition": lambda s: all(40 <= s[k] <= 72 for k in ["speed","stamina","corner","mental","adaptability"])},
+    {"id":  9, "name": "晩成型",      "condition": lambda s: s.get("peak_month", 6) >= 10},
+    {"id": 10, "name": "早熟型",      "condition": lambda s: s.get("peak_month", 6) <= 4},
+
+    # ── コース系 ─────────────────────────────────
+    {"id": 11, "name": "芝巧者",      "condition": lambda s: s.get("apt_turf") == "◎"},
+    {"id": 12, "name": "ダート巧者",  "condition": lambda s: s.get("apt_dirt") == "◎"},
+    {"id": 13, "name": "長距離適性",  "condition": lambda s: s["stamina"] >= 70 and s["adaptability"] >= 60},
+    {"id": 14, "name": "短距離砲",    "condition": lambda s: s["speed"] >= 75 and s["stamina"] <= 50},
+    {"id": 15, "name": "万場巧者",    "condition": lambda s: s.get("apt_turf") == "◎" and s.get("apt_dirt") == "◎"},
+
+    # ── 育成ルート系 ─────────────────────────────
+    {"id": 16, "name": "鍛錬の申し子","condition": lambda s: s.get("_history_count", {}).get(0, 0) >= 4},
+    {"id": 17, "name": "メンタルの強さ","condition": lambda s: s.get("_history_count", {}).get(3, 0) >= 4},
+    {"id": 18, "name": "放牧好き",    "condition": lambda s: s.get("_history_count", {}).get(4, 0) >= 3},
+    {"id": 19, "name": "無敗の気質",  "condition": lambda s: s.get("_injury_count", 0) == 0},
+    {"id": 20, "name": "苦労人",      "condition": lambda s: s.get("_injury_count", 0) >= 2 and s["speed"]+s["stamina"] >= 120},
+    {"id": 21, "name": "特訓の鬼",    "condition": lambda s: s.get("_history_count", {}).get(7, 0) >= 3},
+    {"id": 22, "name": "バランス調教","condition": lambda s: len(set(s.get("_history_list", []))) >= 6},
+]
+
+# ── コンボ特性（複数特性の組み合わせで付与） ───────────
+COMBO_TRAITS = [
+    {
+        "name": "先行逃げ切り",
+        "requires": {"快速型", "コーナー巧者"},
+        "bonus": {"speed_race": 1.06},
+        "desc": "短〜中距離で先行有利",
+    },
+    {
+        "name": "末脚怪物",
+        "requires": {"鉄人", "精神力"},
+        "bonus": {"stamina_race": 1.06},
+        "desc": "長距離で末脚が炸裂",
+    },
+    {
+        "name": "芝の帝王",
+        "requires": {"芝巧者", "万能型"},
+        "bonus": {"turf_bonus": 1.08},
+        "desc": "芝レースで圧倒的な適性",
+    },
+    {
+        "name": "復活の申し子",
+        "requires": {"苦労人", "不屈"},
+        "bonus": {"cond_protect": True},
+        "desc": "不調時でも能力低下しにくい",
+    },
+    {
+        "name": "天才肌",
+        "requires": {"無敗の気質", "快速型"},
+        "bonus": {"luck_bias": 0.08},
+        "desc": "レース結果がプラス方向に偏る",
+    },
+    {
+        "name": "孤高の怪物",
+        "requires": {"特訓の鬼", "鬼神"},
+        "bonus": {"all_bonus": 1.07},
+        "desc": "全距離でトップクラスの補正",
+    },
+    {
+        "name": "芝ダート二刀流",
+        "requires": {"芝巧者", "ダート巧者"},
+        "bonus": {"turf_bonus": 1.04, "dirt_bonus": 1.04},
+        "desc": "どちらのコースでも力を発揮",
+    },
+    {
+        "name": "長距離の鬼",
+        "requires": {"長距離適性", "鉄人"},
+        "bonus": {"stamina_race": 1.08},
+        "desc": "長距離レースで無類の強さ",
+    },
 ]
 
 # ── 調教師の完成評価メッセージ ────────────────────────
@@ -287,16 +360,25 @@ def apply_training(stats, fatigue, menu_id, month, growth_rate, peak_month):
         if rng.random() < prob:
             new_s, sub_msg = ev["effect"](s, rng)
             s = new_s
-            # 疲労回復イベント
             if ev["id"] == "recovery":
                 f = max(0, f - rng.randint(10, 20))
+            if ev["id"] == "injury":
+                s["_injury_count"] = s.get("_injury_count", 0) + 1
             msg = rng.choice(ev["messages"])
             event_result = {
                 "message_prefix": ev["message_prefix"],
                 "message":        msg,
                 "sub":            sub_msg,
             }
-            break  # 1回のみ
+            break
+
+    # 育成ルート記録
+    hc = s.get("_history_count", {})
+    hc[menu_id] = hc.get(menu_id, 0) + 1
+    s["_history_count"] = hc
+    hl = s.get("_history_list", [])
+    hl.append(menu_id)
+    s["_history_list"] = hl
 
     return s, f, event_result
 
@@ -323,6 +405,85 @@ def replay_training(seed, history):
     stats["traits"] = traits
     stats["fatigue"]= fatigue
     return stats
+
+
+# ── 特性決定（単体＋コンボ） ─────────────────────────
+def determine_traits(stats):
+    """単体特性 + コンボ特性を判定して名前リストを返す"""
+    single = [t["name"] for t in TRAITS if t["condition"](stats)]
+    single_set = set(single)
+    combo  = [c["name"] for c in COMBO_TRAITS if c["requires"].issubset(single_set)]
+    return single + combo
+
+
+def get_trait_bonus(traits):
+    """
+    特性リストからレース計算用ボーナス辞書を返す
+    returns: {bonus_key: value}
+    """
+    bonus = {}
+    trait_set = set(traits)
+    for c in COMBO_TRAITS:
+        if c["name"] in trait_set:
+            for k, v in c["bonus"].items():
+                if k in bonus:
+                    bonus[k] = bonus[k] * v if isinstance(v, float) else v
+                else:
+                    bonus[k] = v
+    return bonus
+
+
+# ── コンディションボーナス計算（B: 育成終盤→調子影響） ─
+def calc_condition_bonus(stats, history, final_fatigue):
+    """
+    育成終盤の状態から調子確率のシフト量を返す
+    returns: int -2〜+2
+      +2 = 絶好調になりやすい
+      -2 = 不調になりやすい
+    """
+    score = 0
+
+    # 疲労による判定
+    if final_fatigue <= 20:
+        score += 2
+    elif final_fatigue <= 40:
+        score += 1
+    elif final_fatigue >= 70:
+        score -= 2
+    elif final_fatigue >= 55:
+        score -= 1
+
+    # 終盤3ヶ月のメニュー
+    last3 = history[-3:] if len(history) >= 3 else history
+    recovery_menus = {3, 4}   # メンタルケア・放牧
+    heavy_menus    = {7}       # 特別特訓
+    recovery_count = sum(1 for m in last3 if m in recovery_menus)
+    heavy_count    = sum(1 for m in last3 if m in heavy_menus)
+    score += recovery_count
+    score -= heavy_count
+
+    # 怪我の直近履歴
+    injury = stats.get("_injury_count", 0)
+    if injury >= 2:
+        score -= 1
+
+    # 全盛期が後期なら調子が乗りやすい
+    if stats.get("peak_month", 6) >= 10:
+        score += 1
+
+    return max(-2, min(2, score))
+
+
+def shift_condition_weights(base_weights, bonus):
+    """
+    base_weights: [◎, ○, △, ×] の確率ウェイト
+    bonus: -2〜+2
+    """
+    w = list(base_weights)
+    # +1ごとに◎+5, ×-5; -1ごとに◎-5, ×+5
+    w[0] = max(1, w[0] + bonus * 5)   # ◎
+    w[3] = max(1, w[3] - bonus * 5)   # ×
+    return w
 
 
 # ── 表示ヘルパー ──────────────────────────────────────
@@ -395,7 +556,10 @@ def trained_to_race_horse(name, seed, history, number, surface):
         return max(1, min(10, round(v / 10)))
     aff_val                    = _r.choices([-1,0,1,2], weights=[10,40,35,15])[0]
     aff_sym, aff_mult, _       = AFFINITY_LABELS[aff_val]
-    cond_sym, cond_mult, _     = _r.choices(CONDITIONS, weights=CONDITION_WEIGHTS)[0]
+    # 育成結果を調子確率に反映（B: コンディションボーナス）
+    cond_bonus  = calc_condition_bonus(stats, stats.get("_history_list",[]), stats.get("fatigue",0))
+    cond_weights = shift_condition_weights(list(CONDITION_WEIGHTS), cond_bonus)
+    cond_sym, cond_mult, _ = _r.choices(CONDITIONS, weights=cond_weights)[0]
     from horserace import make_comment
     horse = {
         "number":       number,
@@ -417,6 +581,8 @@ def trained_to_race_horse(name, seed, history, number, surface):
         "coat":         _r.choice(["brown","white"]),
         "is_trained":   True,
         "traits":       stats.get("traits", []),
+        "trait_bonus":  get_trait_bonus(stats.get("traits", [])),  # コンボ効果
+        "cond_bonus":   cond_bonus,   # 調子ボーナス値（表示用）
         "raw_stats":    stats,
     }
     horse["comment"] = make_comment(horse, surface, 2000)

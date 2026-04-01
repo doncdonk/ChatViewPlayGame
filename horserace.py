@@ -172,6 +172,30 @@ def calc_base_score(horse, surface, distance):
     # 騎手×馬相性補正
     score *= horse["aff_mult"]
 
+    # ── 育成馬のコンボ特性ボーナス ──
+    tb = horse.get("trait_bonus", {})
+    if tb:
+        # 全体ボーナス
+        if "all_bonus" in tb:
+            score *= tb["all_bonus"]
+        # 距離別ボーナス
+        if "speed_race" in tb and distance <= 1800:
+            score *= tb["speed_race"]
+        if "stamina_race" in tb and distance >= 2000:
+            score *= tb["stamina_race"]
+        # 馬場別ボーナス
+        if "turf_bonus" in tb and surface == "芝":
+            score *= tb["turf_bonus"]
+        if "dirt_bonus" in tb and surface == "ダート":
+            score *= tb["dirt_bonus"]
+        # コンディション保護（不調時の減少を緩和）
+        if tb.get("cond_protect") and horse["cond_mult"] < 1.0:
+            score /= horse["cond_mult"]          # 一旦戻す
+            score *= max(0.95, horse["cond_mult"])  # 軽微な減少に
+        # 幸運バイアス（ランダムブレをプラス方向へ）
+        if "luck_bias" in tb:
+            score *= (1.0 + tb["luck_bias"])
+
     return score
 
 
