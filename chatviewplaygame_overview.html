@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&family=Share+Tech+Mono&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0e1a;
+    color: #e0e8ff;
+    font-family: 'Share Tech Mono', 'Noto Sans JP', monospace;
+    min-height: 100vh;
+    padding: 0;
+  }
+
+  .poster {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 32px 24px 40px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* 背景グリッド */
+  .poster::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(60,100,255,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(60,100,255,0.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+  }
+
+  /* ヘッダー */
+  .header {
+    text-align: center;
+    margin-bottom: 32px;
+    position: relative;
+  }
+
+  .badge {
+    display: inline-block;
+    background: rgba(60,100,255,0.15);
+    border: 1px solid rgba(60,100,255,0.4);
+    color: #7ba4ff;
+    font-size: 11px;
+    letter-spacing: 3px;
+    padding: 4px 16px;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+  }
+
+  .title {
+    font-size: clamp(28px, 5vw, 48px);
+    font-weight: 900;
+    color: #ffffff;
+    letter-spacing: -1px;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+
+  .title span {
+    color: #4d8fff;
+  }
+
+  .subtitle {
+    font-size: 13px;
+    color: #6a7fa8;
+    letter-spacing: 1px;
+  }
+
+  /* ゲームカード */
+  .games-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .game-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 18px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+
+  .game-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+  .card-bomb::before   { background: #ff4d6a; }
+  .card-reversi::before { background: #4d8fff; }
+  .card-horse::before  { background: #ffc84d; }
+  .card-paint::before  { background: #4dff9e; }
+
+  .card-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+    display: block;
+  }
+
+  .card-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #e0e8ff;
+    margin-bottom: 4px;
+  }
+
+  .card-desc {
+    font-size: 11px;
+    color: #5a6f90;
+    line-height: 1.6;
+    font-family: 'Noto Sans JP', sans-serif;
+  }
+
+  .card-chat {
+    margin-top: 10px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .chip {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .chip-bomb    { color: #ff4d6a; border-color: rgba(255,77,106,0.4); background: rgba(255,77,106,0.08); }
+  .chip-reversi { color: #4d8fff; border-color: rgba(77,143,255,0.4); background: rgba(77,143,255,0.08); }
+  .chip-horse   { color: #ffc84d; border-color: rgba(255,200,77,0.4); background: rgba(255,200,77,0.08); }
+  .chip-paint   { color: #4dff9e; border-color: rgba(77,255,158,0.4); background: rgba(77,255,158,0.08); }
+
+  /* 育成特集エリア */
+  .feature-box {
+    background: rgba(255,200,77,0.04);
+    border: 1px solid rgba(255,200,77,0.2);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 24px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+
+  .feature-icon {
+    font-size: 36px;
+  }
+
+  .feature-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #ffc84d;
+    margin-bottom: 6px;
+  }
+
+  .feature-body {
+    font-size: 11px;
+    color: #7a8faa;
+    line-height: 1.7;
+    font-family: 'Noto Sans JP', sans-serif;
+  }
+
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+
+  .flow-step {
+    background: rgba(255,200,77,0.1);
+    border: 1px solid rgba(255,200,77,0.25);
+    color: #ffc84d;
+    font-size: 10px;
+    padding: 3px 10px;
+    border-radius: 4px;
+  }
+
+  .flow-arrow {
+    color: #4a5a70;
+    font-size: 12px;
+  }
+
+  /* セットアップ */
+  .setup-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+
+  .setup-step {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+  }
+
+  .step-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(60,100,255,0.15);
+    border: 1px solid rgba(60,100,255,0.3);
+    color: #7ba4ff;
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 8px;
+  }
+
+  .step-title {
+    font-size: 12px;
+    color: #c0d0f0;
+    margin-bottom: 4px;
+    font-weight: 700;
+  }
+
+  .step-body {
+    font-size: 10px;
+    color: #4a5a70;
+    line-height: 1.5;
+    font-family: 'Noto Sans JP', sans-serif;
+  }
+
+  /* フッター */
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding-top: 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .footer-left {
+    font-size: 10px;
+    color: #3a4a60;
+    line-height: 1.6;
+    font-family: 'Noto Sans JP', sans-serif;
+  }
+
+  .footer-tags {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    font-size: 10px;
+    color: #3a4a60;
+    border: 1px solid rgba(255,255,255,0.06);
+    padding: 2px 10px;
+    border-radius: 20px;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 600px) {
+    .games-grid { grid-template-columns: 1fr; }
+    .setup-grid { grid-template-columns: 1fr; }
+    .feature-box { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="poster">
+
+  <!-- ヘッダー -->
+  <div class="header">
+    <div class="badge">Twitch Chat Integrated Game Launcher</div>
+    <div class="title">Chat<span>View</span>PlayGame</div>
+    <div class="subtitle">配信者 × 視聴者で遊ぶ　チャット連動ゲームランチャー</div>
+  </div>
+
+  <!-- ゲームカード -->
+  <div class="games-grid">
+    <div class="game-card card-bomb">
+      <span class="card-icon">💣</span>
+      <div class="card-title">ViewBomb</div>
+      <div class="card-desc">チャットが協力してマスを開くマインスイーパー。地雷に当たるとゲームオーバー！</div>
+      <div class="card-chat">
+        <span class="chip chip-bomb">A1</span>
+        <span class="chip chip-bomb">flag B3</span>
+        <span class="chip chip-bomb">Z16</span>
+      </div>
+    </div>
+
+    <div class="game-card card-reversi">
+      <span class="card-icon">♟</span>
+      <div class="card-title">チャットvsリバーシ</div>
+      <div class="card-desc">配信者 vs チャット全員でリバーシ対決。投票で最多の手を選択する。</div>
+      <div class="card-chat">
+        <span class="chip chip-reversi">C3</span>
+        <span class="chip chip-reversi">D4</span>
+        <span class="chip chip-reversi">E5</span>
+      </div>
+    </div>
+
+    <div class="game-card card-horse">
+      <span class="card-icon">🏇</span>
+      <div class="card-title">競馬</div>
+      <div class="card-desc">好きな馬に投票してポイントを競う。馬の育成・コード共有機能付き。</div>
+      <div class="card-chat">
+        <span class="chip chip-horse">1</span>
+        <span class="chip chip-horse">3</span>
+        <span class="chip chip-horse">7</span>
+      </div>
+    </div>
+
+    <div class="game-card card-paint">
+      <span class="card-icon">🎨</span>
+      <div class="card-title">ペイント</div>
+      <div class="card-desc">配信者がお絵描き。視聴者のコメントが弾幕として画面を流れる。</div>
+      <div class="card-chat">
+        <span class="chip chip-paint">コメントが弾幕に</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 育成特集 -->
+  <div class="feature-box">
+    <div class="feature-icon">🐴</div>
+    <div>
+      <div class="feature-title">馬育成システム &amp; コード共有</div>
+      <div class="feature-body">競馬の新機能。12ヶ月かけて自分だけの馬を育成。コードで保存・共有でき、視聴者が持ち寄って最大8頭で出走可能。</div>
+      <div class="flow-row">
+        <span class="flow-step">馬名を決める</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-step">12ヶ月育成</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-step">コード発行</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-step">レースに出走</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-step">勝利を目指す</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- セットアップ -->
+  <div class="setup-grid">
+    <div class="setup-step">
+      <div class="step-num">1</div>
+      <div class="step-title">アプリを起動</div>
+      <div class="step-body">ChatViewPlayGame.exe をダブルクリック</div>
+    </div>
+    <div class="setup-step">
+      <div class="step-num">2</div>
+      <div class="step-title">Twitchと接続</div>
+      <div class="step-body">Settings でチャンネル名とOAuthトークンを入力</div>
+    </div>
+    <div class="setup-step">
+      <div class="step-num">3</div>
+      <div class="step-title">OBSでキャプチャ</div>
+      <div class="step-body">ウィンドウキャプチャで映してゲーム開始！</div>
+    </div>
+  </div>
+
+  <!-- フッター -->
+  <div class="footer">
+    <div class="footer-left">
+      Python + Pillow + NumPy<br>
+      イラスト素材: イラストセンター（R-DESIGN）https://illustcenter.com/
+    </div>
+    <div class="footer-tags">
+      <span class="tag">Windows</span>
+      <span class="tag">OBS対応</span>
+      <span class="tag">Twitch連携</span>
+      <span class="tag">オフラインモードあり</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
