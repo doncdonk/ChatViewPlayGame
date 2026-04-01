@@ -60,7 +60,8 @@ if %errorlevel% neq 0 (
 
 set ZIP_NAME=ChatViewPlayGame_release.zip
 if exist %ZIP_NAME% del %ZIP_NAME%
-powershell -Command "Compress-Archive -Path 'dist\ChatViewPlayGame.exe','dist\token_guide.html','dist\img' -DestinationPath '%ZIP_NAME%'"
+copy /y GUIDE.md dist\GUIDE.md > nul
+powershell -Command "Compress-Archive -Path 'dist\ChatViewPlayGame.exe','dist\token_guide.html','dist\img','dist\GUIDE.md' -DestinationPath '%ZIP_NAME%'"
 if %errorlevel% neq 0 (
     echo ERROR: ZIP creation failed.
     pause
