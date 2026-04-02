@@ -2214,11 +2214,12 @@ class HorseRaceScreen:
 
         # 画像ロード（失敗時はIconHorseRendererにフォールバック）
         import os
-        img_dir = os.path.join(
+        self.img_dir = os.path.join(
             os.path.dirname(sys.executable) if getattr(sys,"frozen",False)
             else os.path.dirname(os.path.abspath(__file__)),
             "img"
         )
+        img_dir = self.img_dir
         track_h   = self.win_h - 80 - 60
         lane_h    = track_h // 8
         target_h  = int(lane_h * 0.85)
@@ -2466,25 +2467,25 @@ class HorseRaceScreen:
             self._load_goal_bg()
 
     def _load_goal_bg(self):
-        """ゴール背景画像（rdesign_19917）と勝ち馬大画像をロード"""
+        """ゴール背景画像（haikei01優先→rdesign_19917フォールバック）と勝ち馬大画像をロード"""
         import os
         self._goal_bg_img       = None
         self._goal_bg_img_small = None
         self._goal_big_img      = None
         try:
             from PIL import Image, ImageTk
-            img_dir = os.path.join(
-                os.path.dirname(sys.executable) if getattr(sys,"frozen",False)
-                else os.path.dirname(os.path.abspath(__file__)), "img")
-            # ゴール背景
-            path = os.path.join(img_dir, "rdesign_19917.png")
-            if os.path.exists(path):
-                img  = Image.open(path).convert("RGBA")
-                full = img.resize((self.win_w, self.win_h), Image.LANCZOS)
-                self._goal_bg_img = ImageTk.PhotoImage(full)
-                gw = int(self.win_h * 0.6)
-                gh = int(self.win_h * 0.6)
-                self._goal_bg_img_small = ImageTk.PhotoImage(img.resize((gw,gh), Image.LANCZOS))
+            img_dir = self.img_dir
+            # haikei01.png を優先、なければ rdesign_19917.png にフォールバック
+            for fname in ("haikei01.png", "rdesign_19917.png"):
+                path = os.path.join(img_dir, fname)
+                if os.path.exists(path):
+                    img  = Image.open(path).convert("RGBA")
+                    full = img.resize((self.win_w, self.win_h), Image.LANCZOS)
+                    self._goal_bg_img = ImageTk.PhotoImage(full)
+                    gw = int(self.win_h * 0.6)
+                    gh = int(self.win_h * 0.6)
+                    self._goal_bg_img_small = ImageTk.PhotoImage(img.resize((gw,gh), Image.LANCZOS))
+                    break
         except Exception as e:
             print(f"[GoalBG] {e}")
 
@@ -3945,6 +3946,8 @@ class TrainingScreen:
         self.month   = 0
         self.history = []
         self.choices = []
+        self.trial_available = False   # 試走可能フラグ（6ヶ月完了後）
+        self.trial_done      = False   # 今周期の試走消化フラグ
         # 演出用スプライト（起動時に1回読み込み）
         self._sprites    = None
         self._anim_job   = None   # after() ジョブID
@@ -3994,11 +3997,13 @@ class TrainingScreen:
         if err:
             self._err_var.set(f"⚠ {err}")
             return
-        self.name    = name
-        self.stats   = self._tr.generate_initial_stats(self.seed)
-        self.fatigue = 0
-        self.month   = 0
-        self.history = []
+        self.name         = name
+        self.stats        = self._tr.generate_initial_stats(self.seed)
+        self.fatigue      = 0
+        self.month        = 0
+        self.history      = []
+        self.trial_available = False
+        self.trial_done      = False
         self._next_month()
 
     # ── 月次育成 ──────────────────────────────
@@ -4006,6 +4011,9 @@ class TrainingScreen:
         if self.month >= self._tr.TRAINING_MONTHS:
             self._show_complete()
             return
+        # 6ヶ月完了タイミングで試走を解放（1回限り）
+        if self.month == 6 and not self.trial_done:
+            self.trial_available = True
         self.choices = self._tr.get_monthly_choices(
             self.month + 1, self.fatigue, self.seed, self.history)
         self._build_training_screen()
@@ -4068,6 +4076,13 @@ class TrainingScreen:
 
         make_label(self.root, f"🐴 {self.name}  第{month}月  / 全12月",
                    fg=ACCENT_COL, font=("Courier",16,"bold")).pack(pady=(16,4))
+
+        # ── 素質ヒント（月ごとに調教師がそっとつぶやく） ──
+        hint = tr.get_aptitude_hint(self.seed, month)
+        hint_frame = tk.Frame(self.root, bg=BTN_DARK)
+        hint_frame.pack(fill="x", padx=28, pady=(0,6))
+        make_label(hint_frame, f"調教師の目: 「{hint}」",
+                   fg=TEXT_G, font=("Courier",10)).pack(anchor="w", padx=12, pady=4)
 
         # 上部: グラフ + 右側情報
         top = tk.Frame(self.root, bg=BG)
@@ -4132,16 +4147,68 @@ class TrainingScreen:
             mf.bind("<Enter>", lambda e, f=mf: f.configure(bg=BTN_DARK_H))
             mf.bind("<Leave>", lambda e, f=mf: f.configure(bg=BTN_DARK))
 
+        # ── 試走ボタン（6ヶ月完了後、1回だけ表示） ──
+        if self.trial_available and not self.trial_done:
+            tf = tk.Frame(self.root, bg="#1A1000",
+                          highlightbackground=FLAG_COL, highlightthickness=1)
+            tf.pack(fill="x", padx=28, pady=(8,2))
+            make_label(tf, "  ⚡ 試走レースに出走する（この月の調教の代わりに）",
+                       fg=FLAG_COL, font=("Courier",12,"bold")).pack(anchor="w", padx=8, pady=(6,0))
+            make_label(tf, "  疲労+10〜20。勝てば経験ボーナス、負ければ次月に悔しさ補正。",
+                       fg=TEXT_G, font=("Courier",9)).pack(anchor="w", padx=8, pady=(0,6))
+            tf.configure(cursor="hand2")
+            tf.bind("<Button-1>", lambda e: self._select_trial())
+            for child in tf.winfo_children():
+                child.bind("<Button-1>", lambda e: self._select_trial())
+            tf.bind("<Enter>", lambda e: tf.configure(bg="#2A1A00"))
+            tf.bind("<Leave>", lambda e: tf.configure(bg="#1A1000"))
+
     # ── スプライト読み込み ──────────────────────
     def _load_sprites(self):
         """育成演出用スプライトを読み込む（Pillow必須）"""
         import os
-        img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+        self._img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+        img_dir = self._img_dir
         try:
             from horserace import load_horse_sprites
-            self._sprites = load_horse_sprites(img_dir, target_h=80)
+            self._sprites = load_horse_sprites(img_dir, target_h=160)
         except Exception:
             self._sprites = None
+        # 背景画像をキャッシュ（Pillowが使えるときだけ）
+        self._bg_cache = {}
+        try:
+            from PIL import Image, ImageTk as _ITk
+            # haikei02=厩舎, haikei03=ウッドチップ, haikei04=坂路, haikei05=試走レース
+            _load_map = {
+                "mental":  "haikei02.png",
+                "pasture": "haikei02.png",
+                "speed":   "haikei03.png",
+                "balance": "haikei03.png",
+                "adapt":   "haikei03.png",
+                "special": "haikei03.png",
+                "stamina": "haikei04.png",
+                "corner":  "haikei04.png",
+                "trial":   "haikei05.png",
+            }
+            _loaded = {}
+            for kind, fname in _load_map.items():
+                if fname not in _loaded:
+                    p = os.path.join(img_dir, fname)
+                    if os.path.exists(p):
+                        _loaded[fname] = Image.open(p).convert("RGBA")
+                    else:
+                        _loaded[fname] = None
+                self._bg_cache[kind] = _loaded[fname]
+        except Exception:
+            pass
+
+        # 試走用: 4頭分のスプライトを小さいサイズで用意
+        self._trial_sprites = None
+        try:
+            from horserace import load_horse_sprites
+            self._trial_sprites = load_horse_sprites(img_dir, target_h=120)
+        except Exception:
+            pass
 
     # ── メニュー演出 ─────────────────────────────
     # メニューID → (演出種類, 色, ラベル)
@@ -4212,6 +4279,7 @@ class TrainingScreen:
         import math
 
         # ── 背景 ──
+        # 背景画像キャッシュから取得し、なければフォールバックカラーで描画
         bg_colors = {
             "speed":   "#0A0500",
             "stamina": "#00050A",
@@ -4222,35 +4290,46 @@ class TrainingScreen:
             "balance": "#040408",
             "special": "#0A0600",
         }
-        cv.create_rectangle(0, 0, W, H,
-            fill=bg_colors.get(kind, BG), outline="")
+        # PhotoImage キャッシュ（解像度変化に対応）
+        _pimg_key = f"_bgpimg_{kind}_{W}x{H}"
+        _bg_pimg = getattr(self, _pimg_key, None)
+        if _bg_pimg is None:
+            _raw = self._bg_cache.get(kind) if hasattr(self, "_bg_cache") else None
+            if _raw is not None:
+                try:
+                    from PIL import Image as _PILImg, ImageTk as _ITk
+                    _resized = _raw.resize((W, H), _PILImg.LANCZOS)
+                    _bg_pimg = _ITk.PhotoImage(_resized)
+                    setattr(self, _pimg_key, _bg_pimg)
+                except Exception:
+                    _bg_pimg = None
+
+        if _bg_pimg is not None:
+            cv.create_image(0, 0, image=_bg_pimg, anchor="nw")
+        else:
+            cv.create_rectangle(0, 0, W, H,
+                fill=bg_colors.get(kind, BG), outline="")
 
         GY = H - 120  # 地面 y
 
-        # ── 種類別背景演出 ──
+        # ── 種類別オーバーレイ演出（背景画像の上に重ねる） ──
         if kind == "speed":
-            # 速度線
-            for i in range(12):
+            # 速度線（半透明風に細めの線を重ねる）
+            for i in range(10):
                 lx = int((f * 8 + i * 90) % (W + 150)) - 150
                 ly = GY - 60 + i * 8
                 ln = 50 + i * 6
-                alpha_val = max(0, min(255, int((0.15 + i*0.04)*255)))
                 cv.create_line(lx, ly, lx+ln, ly,
                     fill=color, width=2)
 
-        elif kind == "stamina":
-            # 坂道
-            cv.create_polygon(0, H, W, H, W, GY-40, 0, GY+20,
-                fill="#0A1020", outline="")
-
         elif kind == "corner":
-            # コースライン
+            # コースライン強調
             cv.create_arc(W//2-250, GY-100, W//2+250, GY+300,
                 start=30, extent=120, style="arc",
-                outline=color, width=2)
+                outline=color, width=3)
 
         elif kind == "mental":
-            # 星
+            # 星のオーバーレイ
             for i in range(25):
                 sx = int((i * 139 + f * 0.3) % W)
                 sy = int((i * 67 + f * 0.7) % (GY - 20))
@@ -4258,26 +4337,8 @@ class TrainingScreen:
                 cv.create_oval(sx-sr, sy-sr, sx+sr, sy+sr,
                     fill=color, outline="")
 
-        elif kind == "pasture":
-            # 空
-            cv.create_rectangle(0, 0, W, GY-20, fill="#060E14", outline="")
-            # 丘
-            cv.create_polygon(
-                0, H, 0, GY+10,
-                W//4, GY-30, W//2, GY,
-                W*3//4, GY-20, W, GY+10, W, H,
-                fill="#0A2010", outline=""
-            )
-            # 草
-            for i in range(40):
-                gx = (i * 53 + 10) % (W - 10)
-                gy2 = GY + 5 + int(math.sin(i * 1.3) * 12)
-                wave = int(math.sin(f * 0.05 + i * 0.4) * 4)
-                cv.create_line(gx, gy2, gx+wave, gy2-12,
-                    fill="#1A5520", width=2)
-
         elif kind == "special":
-            # 炎パーティクル
+            # 炎パーティクルオーバーレイ
             mid_x = W // 2
             for i in range(30):
                 fx2 = mid_x - 50 + (i * 31) % 100 + int(math.sin(f*0.1+i)*10)
@@ -4287,9 +4348,10 @@ class TrainingScreen:
                 cv.create_oval(fx2-r, fy2-r, fx2+r, fy2+r,
                     fill=fc, outline="")
 
-        # 地面
-        cv.create_rectangle(0, GY, W, H, fill="#101018", outline="")
-        cv.create_line(0, GY, W, GY, fill="#333344", width=1)
+        # 背景画像がない場合のみ地面を描画（画像あり時は画像内の地面を使う）
+        if _bg_pimg is None:
+            cv.create_rectangle(0, GY, W, H, fill="#101018", outline="")
+            cv.create_line(0, GY, W, GY, fill="#333344", width=1)
 
         # ── 馬画像 or フォールバック図形 ──
         if kind == "special":
@@ -4298,13 +4360,11 @@ class TrainingScreen:
             shake = 0
 
         if kind == "pasture":
-            # 放牧: ゆっくり往復
-            max_x = W - 150
-            cycle  = (f % (max_x * 2))
-            hx     = cycle if cycle < max_x else max_x * 2 - cycle
-            horse_x = int(60 + hx)
+            # 放牧: 画面中央付近でゆったり小さく揺れるだけ
+            import math as _m
+            horse_x  = W // 2 + int(_m.sin(f * 0.025) * 60)
             horse_y  = GY - 10
-            speed_mult = 0.04
+            speed_mult = 0.01
         elif kind == "mental":
             # ゆらゆら
             horse_x  = W // 2 + int(math.sin(f * 0.04) * 20) + shake
@@ -4386,7 +4446,8 @@ class TrainingScreen:
             self.stats, self.fatigue, menu["id"],
             self.month + 1,
             self.stats["growth_rate"],
-            self.stats["peak_month"]
+            self.stats["peak_month"],
+            seed=self.seed
         )
         self.stats   = new_stats
         self.fatigue = new_fat
@@ -4400,6 +4461,256 @@ class TrainingScreen:
             menu["id"],
             on_done=lambda: self._show_coach_message(menu, coach_msg, event)
         )
+
+    def _select_trial(self):
+        """試走レースを実行"""
+        tr = self._tr
+        new_stats, new_fat, event = tr.apply_trial_race(
+            self.stats, self.fatigue, self.month + 1, self.seed,
+            my_name=self.name)
+        self.stats        = new_stats
+        self.fatigue      = new_fat
+        self.history.append(tr.TRIAL_MENU_ID)
+        self.month       += 1
+        self.trial_done   = True
+        self.trial_available = False
+        outcome = event.get("outcome", "mid")
+        # 試走専用アニメ（haikei05背景 + 4頭レース演出）
+        self._play_trial_anim(
+            on_done=lambda: self._show_trial_result(event, outcome),
+            outcome=outcome
+        )
+
+    def _play_trial_anim(self, on_done, outcome="mid"):
+        """試走レース専用演出: haikei05背景 + 4頭走行アニメ"""
+        for w in self.root.winfo_children():
+            w.destroy()
+
+        res_name = self.cfg.get("resolution", DEFAULT_RES)
+        W, H = RESOLUTIONS.get(res_name, RESOLUTIONS[DEFAULT_RES])
+
+        cv = tk.Canvas(self.root, width=W, height=H,
+                       bg=BG, highlightthickness=0)
+        cv.pack()
+
+        # スキップボタン
+        skip_f = tk.Frame(self.root, bg=BG)
+        skip_f.place(x=W-120, y=H-50)
+        make_btn(skip_f, "▶ スキップ", lambda: self._skip_anim(on_done),
+                 bg=BTN_DARK).pack()
+
+        self._anim_frame = 0
+        DURATION = 210   # 約7秒
+        FPS_MS   = 33
+
+        # 背景PhotoImageキャッシュ
+        _bg_key = f"_trial_bg_{W}x{H}"
+        _bg_pimg = getattr(self, _bg_key, None)
+        if _bg_pimg is None:
+            _raw = self._bg_cache.get("trial") if hasattr(self, "_bg_cache") else None
+            if _raw is not None:
+                try:
+                    from PIL import Image as _PI, ImageTk as _ITk
+                    _bg_pimg = _ITk.PhotoImage(_raw.resize((W, H), _PI.LANCZOS))
+                    setattr(self, _bg_key, _bg_pimg)
+                except Exception:
+                    _bg_pimg = None
+
+        # 4頭の設定（seed由来で毎回同じ組み合わせ）
+        import random as _rr
+        _rng = _rr.Random(self.seed ^ 0xF00D)
+        _coats  = ["brown","white","brown","brown"]
+        _snums  = [((self.seed+i) % 8)+1 for i in range(4)]
+        # レーンのy比率（haikei05実測ベース: 奥芝→ダート→手前芝）
+        # 奥の芝コース: y_img≈440〜480/768 → ratio 0.580〜0.625
+        # ダートコース: y_img≈490〜515/768 → ratio 0.638〜0.671
+        # 奥側は小さく(scale小)、手前は大きく(scale=1.0)
+        _lanes = [
+            {"y_ratio": 0.575, "scale": 0.45, "speed": 4.6, "offset": W*0.08},
+            {"y_ratio": 0.600, "scale": 0.58, "speed": 4.2, "offset": W*0.30},
+            {"y_ratio": 0.645, "scale": 0.82, "speed": 5.0, "offset": W*0.00},
+            {"y_ratio": 0.668, "scale": 1.00, "speed": 4.8, "offset": W*0.18},
+        ]
+        # 自馬（seed由来）は手前レーン(index 3)を使用
+        _my_coat = "brown" if self.seed % 2 == 0 else "white"
+        _my_snum = (self.seed % 8) + 1
+        _coats[3] = _my_coat
+        _snums[3] = _my_snum
+
+        # 結果に応じた自馬スピード補正
+        speed_bonus = {"victory": 1.25, "mid": 1.0, "defeat": 0.72}.get(outcome, 1.0)
+        _lanes[3]["speed"] *= speed_bonus
+
+        # 競争馬カラー（背番号色）
+        _jockey_colors = ["#FF4444","#4488FF","#44CC66","#FFCC00"]
+
+        def loop():
+            f = self._anim_frame
+            if f >= DURATION:
+                if self._anim_job:
+                    self.root.after_cancel(self._anim_job)
+                    self._anim_job = None
+                on_done()
+                return
+
+            cv.delete("all")
+
+            # 背景
+            if _bg_pimg:
+                cv.create_image(0, 0, image=_bg_pimg, anchor="nw")
+            else:
+                cv.create_rectangle(0, 0, W, H, fill="#5A8A3A", outline="")
+
+            # 4頭を奥→手前の順で描画（奥が先に描かれ手前が上に重なる）
+            import math
+            for idx in range(4):
+                lane  = _lanes[idx]
+                hy    = int(lane["y_ratio"] * H)
+                sc    = lane["scale"]
+                spd   = lane["speed"]
+                off   = lane["offset"]
+                # 右から左へ流れる（ゲートが左にあるので右→左）
+                # ただし画像を見ると馬は右方向へ走るので左→右
+                hx = int((f * spd + off) % (W + 200)) - 60
+
+                coat = _coats[idx]
+                snum = _snums[idx]
+                jcol = _jockey_colors[idx]
+
+                # 奥の馬は薄く（遠近感）
+                drawn = False
+                sprites = self._trial_sprites
+                if sprites:
+                    sp_key = (coat, snum)
+                    base_sp = sprites.get(sp_key)
+                    if base_sp:
+                        # スケール別キャッシュ
+                        sp_cache_key = f"_tsp_{coat}_{snum}_{sc:.2f}"
+                        scaled_sp = getattr(self, sp_cache_key, None)
+                        if scaled_sp is None:
+                            try:
+                                from PIL import Image as _PI, ImageTk as _ITk
+                                from horserace import SPRITE_CROPS
+                                import numpy as np
+                                path = self._img_dir + f"/rdesign_19914.png" if coat=="brown" else self._img_dir + f"/rdesign_19916.png"
+                                import os
+                                sheet = _PI.open(os.path.join(self._img_dir,
+                                    "rdesign_19914.png" if coat=="brown" else "rdesign_19916.png")).convert("RGBA")
+                                arr = np.array(sheet)
+                                mask = (arr[:,:,0].astype(int)+arr[:,:,1].astype(int)+arr[:,:,2].astype(int))<=30
+                                arr[mask,3]=0
+                                x1,y1,x2,y2 = SPRITE_CROPS[snum]
+                                crop = _PI.fromarray(arr,"RGBA").crop((x1,y1,x2,y2))
+                                crop = crop.transpose(_PI.FLIP_LEFT_RIGHT)
+                                th = int(120 * sc)
+                                tw = int(crop.width * th / crop.height)
+                                if th > 0 and tw > 0:
+                                    crop = crop.resize((tw, th), _PI.LANCZOS)
+                                    scaled_sp = _ITk.PhotoImage(crop)
+                                    setattr(self, sp_cache_key, scaled_sp)
+                            except Exception:
+                                scaled_sp = None
+                        if scaled_sp:
+                            cv.create_image(hx, hy, image=scaled_sp, anchor="s")
+                            # 勝負服（騎手カラーの丸: 馬の背〜頭あたりに重ねる）
+                            jr = max(4, int(10 * sc))
+                            jy = int(hy - 100 * sc)
+                            cv.create_oval(hx-jr, jy-jr, hx+jr, jy+jr,
+                                fill=jcol, outline="white", width=1)
+                            drawn = True
+
+                if not drawn:
+                    # フォールバック図形馬
+                    s = sc
+                    cv.create_oval(hx-18*s, hy-16*s, hx+18*s, hy,
+                        fill=jcol, outline="")
+                    cv.create_oval(hx+8*s, hy-28*s, hx+22*s, hy-10*s,
+                        fill=jcol, outline="")
+
+            # テキストオーバーレイ
+            outcome_txt = {"victory":"⚡ 試走レース中... 快走！",
+                           "mid":    "⚡ 試走レース中...",
+                           "defeat": "⚡ 試走レース中... 苦戦..."}
+            txt_col = {"victory": SAFE_COL, "mid": FLAG_COL, "defeat": MINE_COL}.get(outcome, TEXT_W)
+            cv.create_text(W//2, 36,
+                text=outcome_txt.get(outcome,"⚡ 試走レース中..."),
+                fill=txt_col, font=("Courier", 20, "bold"),
+                anchor="center")
+
+            # 進捗バー
+            prog_w = int((f / DURATION) * (W - 80))
+            cv.create_rectangle(40, H-28, W-40, H-12,
+                fill="#1A1A2A", outline="#445566")
+            cv.create_rectangle(40, H-28, 40+prog_w, H-12,
+                fill=txt_col, outline="")
+            cv.create_text(W//2, H-20, text=f"🐴 {self.name}  試走中...",
+                fill=TEXT_G, font=("Courier", 10))
+
+            self._anim_frame += 1
+            self._anim_job = self.root.after(FPS_MS, loop)
+
+        loop()
+
+    def _show_trial_result(self, event, outcome):
+        """試走結果画面"""
+        for w in self.root.winfo_children(): w.destroy()
+        tr = self._tr
+
+        outcome_colors = {"victory": SAFE_COL, "mid": FLAG_COL, "defeat": MINE_COL}
+        outcome_labels = {"victory": "🏆 勝利！", "mid": "📊 中位", "defeat": "💔 惨敗"}
+        col   = outcome_colors.get(outcome, TEXT_W)
+        label = outcome_labels.get(outcome, "試走完了")
+
+        make_label(self.root, f"⚡ 試走レース結果 — {label}",
+                   fg=col, font=("Courier",18,"bold")).pack(pady=(28,8))
+        make_label(self.root, f"🐴 {self.name}  第{self.month}月 完了（試走）",
+                   fg=ACCENT_COL, font=("Courier",13)).pack(pady=(0,16))
+
+        res_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
+        res_frame.pack(fill="x", padx=40, pady=(0,12))
+        make_label(res_frame, event["message_prefix"],
+                   fg=col, font=("Courier",12,"bold")).pack(anchor="w", padx=12, pady=(8,0))
+        make_label(res_frame, event["message"],
+                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20)
+        make_label(res_frame, event["sub"],
+                   fg=TEXT_G, font=("Courier",10)).pack(anchor="w", padx=20, pady=(0,8))
+
+        # ── 順位表示 ──
+        ranking = event.get("ranking", [])
+        my_rank = event.get("my_rank", "-")
+        if ranking:
+            rank_frame = tk.Frame(self.root, bg="#0A1A0A")
+            rank_frame.pack(fill="x", padx=40, pady=(0,10))
+            make_label(rank_frame, "── レース順位 ──",
+                       fg=TEXT_G, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(6,2))
+            medals = ["🥇","🥈","🥉","4"]
+            for i, horse_nm in enumerate(ranking):
+                is_my = (horse_nm == self.name)
+                nm_col = col if is_my else TEXT_W
+                nm_bold = "bold" if is_my else "normal"
+                tag = " ◀ 我が馬" if is_my else ""
+                make_label(rank_frame,
+                           f"  {medals[i]}  {horse_nm}{tag}",
+                           fg=nm_col, font=("Courier",11,nm_bold)
+                           ).pack(anchor="w", padx=16)
+            tk.Label(rank_frame, text="", bg="#0A1A0A").pack(pady=2)
+
+        # 試走実績
+        results = self.stats.get("_trial_result", [])
+        if results:
+            rlabels = {"victory":"勝", "mid":"中", "defeat":"敗"}
+            r_str = " ".join(rlabels.get(r,"?") for r in results)
+            make_label(self.root, f"試走実績: {r_str}",
+                       fg=TEXT_G, font=("Courier",10)).pack(pady=(4,0))
+
+        bf = tk.Frame(self.root, bg=BG)
+        bf.pack(pady=(20,0))
+        if self.month >= tr.TRAINING_MONTHS:
+            make_btn(bf, "育成完了へ ▶", self._show_complete,
+                     bg=SAFE_COL, fg=BG).pack()
+        else:
+            make_btn(bf, f"第{self.month+1}月へ ▶", self._next_month,
+                     bg=SAFE_COL, fg=BG).pack()
 
     def _show_coach_message(self, menu, coach_msg, event):
         for w in self.root.winfo_children(): w.destroy()
@@ -4433,6 +4744,84 @@ class TrainingScreen:
             make_btn(bf, "育成完了へ ▶", self._show_complete,
                      bg=SAFE_COL, fg=BG).pack()
         else:
+            # extra_trial_pending: 特別招待レースボタンを追加表示
+            if self.stats.get("_extra_trial_pending"):
+                make_btn(bf, "⚡ 特別招待レースに参加する！",
+                         self._select_extra_trial,
+                         bg=FLAG_COL, fg=BG).pack(pady=(0,6))
+            make_btn(bf, f"第{self.month+1}月へ ▶", self._next_month,
+                     bg=SAFE_COL, fg=BG).pack()
+
+    def _select_extra_trial(self):
+        """特別招待レース（追加試走）を実行"""
+        # pending フラグをクリア
+        self.stats["_extra_trial_pending"] = False
+        tr = self._tr
+        new_stats, new_fat, event = tr.apply_trial_race(
+            self.stats, self.fatigue, self.month, self.seed ^ 0xEEEE,
+            my_name=self.name)
+        self.stats   = new_stats
+        self.fatigue = new_fat
+        # history には記録せず（月消費なし）、trial_count/resultは加算される
+        outcome = event.get("outcome", "mid")
+        self._play_trial_anim(
+            on_done=lambda: self._show_extra_trial_result(event, outcome),
+            outcome=outcome
+        )
+
+    def _show_extra_trial_result(self, event, outcome):
+        """特別招待レース結果画面（_show_trial_result の軽量版）"""
+        for w in self.root.winfo_children(): w.destroy()
+        tr = self._tr
+        outcome_colors = {"victory": SAFE_COL, "mid": FLAG_COL, "defeat": MINE_COL}
+        outcome_labels = {"victory": "🏆 勝利！", "mid": "📊 中位", "defeat": "💔 惨敗"}
+        col   = outcome_colors.get(outcome, TEXT_W)
+        label = outcome_labels.get(outcome, "完走")
+
+        make_label(self.root, f"⚡ 特別招待レース結果 — {label}",
+                   fg=col, font=("Courier",18,"bold")).pack(pady=(28,8))
+        make_label(self.root, f"🐴 {self.name}  特別試走",
+                   fg=ACCENT_COL, font=("Courier",13)).pack(pady=(0,12))
+
+        res_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
+        res_frame.pack(fill="x", padx=40, pady=(0,10))
+        make_label(res_frame, event["message_prefix"],
+                   fg=col, font=("Courier",12,"bold")).pack(anchor="w", padx=12, pady=(8,0))
+        make_label(res_frame, event["message"],
+                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20, pady=(0,8))
+
+        # 順位表示
+        ranking = event.get("ranking", [])
+        if ranking:
+            rank_frame = tk.Frame(self.root, bg="#0A1A0A")
+            rank_frame.pack(fill="x", padx=40, pady=(0,10))
+            make_label(rank_frame, "── レース順位 ──",
+                       fg=TEXT_G, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(6,2))
+            medals = ["🥇","🥈","🥉","4"]
+            for i, horse_nm in enumerate(ranking):
+                is_my = (horse_nm == self.name)
+                nm_col = col if is_my else TEXT_W
+                nm_bold = "bold" if is_my else "normal"
+                tag = " ◀ 我が馬" if is_my else ""
+                make_label(rank_frame,
+                           f"  {medals[i]}  {horse_nm}{tag}",
+                           fg=nm_col, font=("Courier",11,nm_bold)).pack(anchor="w", padx=16)
+            tk.Label(rank_frame, text="", bg="#0A1A0A").pack(pady=2)
+
+        # 実績
+        results = self.stats.get("_trial_result", [])
+        if results:
+            rlabels = {"victory":"勝", "mid":"中", "defeat":"敗"}
+            r_str = " ".join(rlabels.get(r,"?") for r in results)
+            make_label(self.root, f"試走実績: {r_str}",
+                       fg=TEXT_G, font=("Courier",10)).pack(pady=(4,0))
+
+        bf = tk.Frame(self.root, bg=BG)
+        bf.pack(pady=(20,0))
+        if self.month >= tr.TRAINING_MONTHS:
+            make_btn(bf, "育成完了へ ▶", self._show_complete,
+                     bg=SAFE_COL, fg=BG).pack()
+        else:
             make_btn(bf, f"第{self.month+1}月へ ▶", self._next_month,
                      bg=SAFE_COL, fg=BG).pack()
 
@@ -4449,10 +4838,15 @@ class TrainingScreen:
         combo_traits  = [t for t in traits if t not in single_names]
         base_traits   = [t for t in traits if t in single_names]
 
+        apt = tr.get_aptitude_type(self.seed)
+
         make_label(self.root, "🏆 育成完了！",
                    fg=FLAG_COL, font=("Courier",22,"bold")).pack(pady=(20,4))
         make_label(self.root, f"「{self.name}」が育成を終えました！",
-                   fg=TEXT_W, font=("Courier",13)).pack(pady=(0,12))
+                   fg=TEXT_W, font=("Courier",13)).pack(pady=(0,4))
+        # 素質タイプ開示
+        make_label(self.root, f"素質: 【{apt['name']}】  {apt['desc']}",
+                   fg=ACCENT_COL, font=("Courier",11)).pack(pady=(0,10))
 
         # 調教師の評価
         ev_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
@@ -4470,6 +4864,14 @@ class TrainingScreen:
                        bg=SIDEBAR_BG, highlightthickness=0)
         cv.pack(pady=(0,8))
         self._draw_pentagon(cv, self.stats, graph_size//2, graph_size//2, 68)
+
+        # 試走実績
+        results = self.stats.get("_trial_result", [])
+        if results:
+            rlabels = {"victory": "🏆勝", "mid": "📊中", "defeat": "💔敗"}
+            r_str = "  ".join(rlabels.get(r, "?") for r in results)
+            make_label(self.root, f"試走実績: {r_str}",
+                       fg=TEXT_G, font=("Courier",10)).pack(pady=(0,4))
 
         # 特性表示（単体 + コンボ）
         if base_traits:

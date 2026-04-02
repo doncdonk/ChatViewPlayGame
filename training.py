@@ -7,10 +7,11 @@ import datetime
 import hashlib
 
 TRAINING_MONTHS   = 12
+TRIAL_MENU_ID     = 8   # 試走レースを示す特殊menu_id（historyに記録）
 STAT_MAX          = 100
 STAT_INITIAL_MIN  = 20
 STAT_INITIAL_MAX  = 60
-CODE_VERSION      = 1
+CODE_VERSION      = 2
 BASE62_CHARS      = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 MAX_NAME_BYTES    = 24
 
@@ -112,6 +113,122 @@ COACH_MESSAGES = {
     ],
 }
 
+
+# ── 隠し素質タイプ定義 ──────────────────────────────────
+# seed から決定。プレイヤーには月ごとのヒントでじわじわ開示。
+APTITUDE_TYPES = [
+    {
+        "id":    "prodigy",     # 早熟型
+        "name":  "早熟型",
+        "desc":  "序盤に爆発的に伸びるが、後半は頭打ちになりやすい。",
+        # growth_mult: (前半6ヶ月, 後半6ヶ月)
+        "growth_mult": (1.5, 0.6),
+        "injury_mult": 1.0,
+        "bloom_mult":  1.0,
+        "hints": [
+            "序盤から鋭さがある。これは本物かもしれないぞ。",
+            "この馬、早い段階から伸びているな。",
+            "もう頭角を現してきた。才能の芽吹きか。",
+        ],
+        "late_hint": "…最近、伸びが鈍ってきた気がする。早咲きの宿命か。",
+    },
+    {
+        "id":    "latebloomer",  # 晩成型
+        "name":  "晩成型",
+        "desc":  "序盤は地味だが、後半から急激に才能が開花する。",
+        "growth_mult": (0.6, 1.5),
+        "injury_mult": 0.8,
+        "bloom_mult":  1.0,
+        "hints": [
+            "まだ本気を出していない感じだ。奥を秘めているのか。",
+            "なんとなく、まだ眠っている部分がある気がする。",
+            "焦るな。この馬はじっくり育てるタイプだ。",
+        ],
+        "late_hint": "後半に入ってから、別馬のような動きをしている。これが本領か！",
+    },
+    {
+        "id":    "steady",       # 堅実型
+        "name":  "堅実型",
+        "desc":  "成長にブレが少なく怪我もしにくい。大化けしないが安定感抜群。",
+        "growth_mult": (1.0, 1.0),
+        "injury_mult": 0.4,
+        "bloom_mult":  0.5,  # 覚醒イベント半減
+        "hints": [
+            "コツコツ型だな。派手さはないが積み上げが確実だ。",
+            "怪我知らずで練習できている。これは強みだぞ。",
+            "安定している。ムラがない馬は信頼できる。",
+        ],
+        "late_hint": "最後まで安定した成長だ。堅実に仕上がった。",
+    },
+    {
+        "id":    "wildcard",     # ムラ型
+        "name":  "ムラ型",
+        "desc":  "成長のブレが激しい。大覚醒も大怪我も起きやすい一発屋気質。",
+        "growth_mult": (1.0, 1.0),
+        "injury_mult": 2.0,
+        "bloom_mult":  2.5,  # 覚醒イベント2.5倍
+        "hints": [
+            "今日は別馬のような動きをした。読めない馬だ。",
+            "いい日と悪い日の差が激しい。扱いが難しいな。",
+            "気まぐれな才能だ。うまく引き出せるかが鍵だぞ。",
+        ],
+        "late_hint": "最後まで読めない馬だった。本番で何をやらかすかわからん。",
+    },
+    {
+        "id":    "allround",     # 万能型（素質）
+        "name":  "万能素質",
+        "desc":  "バランス調教が得意。ただし専門特訓は他の素質より伸びにくい。",
+        "growth_mult": (1.0, 1.0),
+        "injury_mult": 0.9,
+        "bloom_mult":  1.0,
+        "hints": [
+            "どの練習もそつなくこなすな。器用な馬だ。",
+            "特定の得意分野はないが、何でも平均以上にこなす。",
+            "バランスよく鍛えれば面白い馬になりそうだ。",
+        ],
+        "late_hint": "まさにバランスの取れた仕上がりだ。堅実な戦力になるぞ。",
+    },
+    {
+        "id":    "enigma",       # 秘匿型
+        "name":  "秘匿型",
+        "desc":  "育成中は読めない。完成時に大化けか凡馬かに振れる謎の素質。",
+        "growth_mult": (1.0, 1.0),
+        "injury_mult": 1.2,
+        "bloom_mult":  1.5,
+        "hints": [
+            "この馬、なんか読めないな…。",
+            "調子がいいのかどうかすら判断できない。謎だ。",
+            "底が知れない馬だ。良くも悪くも、ね。",
+        ],
+        "late_hint": "最後まで正体不明だった。本番でわかるだろう。",
+    },
+]
+# 素質ID→定義の辞書
+APTITUDE_TYPE_MAP = {a["id"]: a for a in APTITUDE_TYPES}
+APTITUDE_IDS      = [a["id"] for a in APTITUDE_TYPES]
+# 素質の重み（出現率）
+APTITUDE_WEIGHTS  = [15, 15, 25, 20, 15, 10]
+
+def get_aptitude_type(seed):
+    """seedから素質タイプを決定（再現可能）"""
+    rng = random.Random(seed ^ 0xDEAD_BEEF)
+    aid = rng.choices(APTITUDE_IDS, weights=APTITUDE_WEIGHTS)[0]
+    return APTITUDE_TYPE_MAP[aid]
+
+def get_aptitude_hint(seed, month):
+    """
+    月に応じたヒントメッセージを返す。
+    月が進むにつれて素質が滲み出る。
+    6ヶ月目以降は遅れ型ヒントも混ぜる。
+    """
+    apt = get_aptitude_type(seed)
+    rng = random.Random(seed ^ month * 0x1234)
+    if month >= 9 and apt.get("late_hint"):
+        # 後半はより明確なヒント
+        if rng.random() < 0.5:
+            return apt["late_hint"]
+    return rng.choice(apt["hints"])
+
 # ── ランダムイベント定義 ─────────────────────────────
 EVENTS = [
     {
@@ -150,6 +267,19 @@ EVENTS = [
         ],
         "effect": lambda stats, rng: _apply_recovery(stats, rng),
     },
+    {
+        "id": "extra_trial",
+        "prob": 0.025,          # 約2〜3%で発動（他イベント後に判定されるため実効は5%前後）
+        "fatigue_threshold": 0,
+        "min_month": 7,         # 7月目以降のみ（apply_trainingで月チェック）
+        "message_prefix": "【特別招待】",
+        "messages": [
+            "近隣の厩舎からレース招待状が届いた！参加するか？",
+            "特別招待レースの話が舞い込んできた！",
+            "ライバル馬のオーナーから挑戦状が届いた！",
+        ],
+        "effect": lambda stats, rng: _apply_extra_trial(stats, rng),
+    },
 ]
 
 def _apply_injury(stats, rng):
@@ -168,6 +298,12 @@ def _apply_breakthrough(stats, rng):
 
 def _apply_recovery(stats, rng):
     return stats, "疲労がすっきり回復した！"
+
+def _apply_extra_trial(stats, rng):
+    """特別招待レースイベント: extra_trial_pending フラグを立てる"""
+    s = dict(stats)
+    s["_extra_trial_pending"] = True
+    return s, "招待状を受け取った。今すぐ参加できる！"
 
 # ── 特性定義（能力値系・コース系・育成ルート系） ────────
 # condition引数: stats dict（history・fatigue含む）
@@ -200,6 +336,9 @@ TRAITS = [
     {"id": 20, "name": "苦労人",      "condition": lambda s: s.get("_injury_count", 0) >= 2 and s["speed"]+s["stamina"] >= 120},
     {"id": 21, "name": "特訓の鬼",    "condition": lambda s: s.get("_history_count", {}).get(7, 0) >= 3},
     {"id": 22, "name": "バランス調教","condition": lambda s: len(set(s.get("_history_list", []))) >= 6},
+    {"id": 23, "name": "試走の申し子",  "condition": lambda s: s.get("_trial_result", []).count("victory") >= 1},
+    {"id": 24, "name": "叩き上げ",      "condition": lambda s: len(s.get("_trial_result", [])) >= 1 and s["speed"]+s["stamina"] >= 100},
+    {"id": 25, "name": "無敗の試走",    "condition": lambda s: len(s.get("_trial_result", [])) >= 1 and "defeat" not in s.get("_trial_result", [])},
 ]
 
 # ── コンボ特性（複数特性の組み合わせで付与） ───────────
@@ -251,6 +390,18 @@ COMBO_TRAITS = [
         "requires": {"長距離適性", "鉄人"},
         "bonus": {"stamina_race": 1.08},
         "desc": "長距離レースで無類の強さ",
+    },
+    {
+        "name": "歴戦の強者",
+        "requires": {"試走の申し子", "精神力"},
+        "bonus": {"all_bonus": 1.05, "luck_bias": 0.05},
+        "desc": "試走経験が本番での強さに直結",
+    },
+    {
+        "name": "不屈の叩き上げ",
+        "requires": {"叩き上げ", "不屈"},
+        "bonus": {"cond_protect": True, "stamina_race": 1.04},
+        "desc": "苦労を乗り越えた馬の底力",
     },
 ]
 
@@ -329,34 +480,73 @@ def get_monthly_choices(month, current_fatigue, seed, history_so_far):
 
 
 # ── 育成効果適用 ──────────────────────────────────────
-def apply_training(stats, fatigue, menu_id, month, growth_rate, peak_month):
+def apply_training(stats, fatigue, menu_id, month, growth_rate, peak_month, seed=None):
     """
     returns: (new_stats, new_fatigue, event_result)
     event_result: None or {"message_prefix":str, "message":str, "sub":str}
+    seed: 指定すると素質タイプ補正が有効になる
     """
+    # 試走レース（menu_id=8）は apply_trial_race で別途処理
+    if menu_id == TRIAL_MENU_ID:
+        return apply_trial_race(stats, fatigue, month, seed)
+
     menu       = TRAINING_MENUS[menu_id]
     s          = dict(stats)
     f          = fatigue
     peak_bonus = 1.5 if month == peak_month else 1.0
     rng        = random.Random(month * 7919 + menu_id * 31 + int(growth_rate * 100))
 
+    # ── 素質タイプ補正 ──
+    apt_mult = 1.0
+    if seed is not None:
+        apt = get_aptitude_type(seed)
+        # 前半(1-6月)/後半(7-12月) で成長率を変える
+        half_idx  = 0 if month <= 6 else 1
+        apt_mult  = apt["growth_mult"][half_idx]
+        # 万能素質: バランス調教(menu_id=6)で追加ボーナス、専門特訓は普通
+        if apt["id"] == "allround" and menu_id == 6:
+            apt_mult *= 1.3
+        # 早熟型: 後半の専門特訓はさらに頭打ち
+        if apt["id"] == "prodigy" and month > 6 and menu_id in (0,1,7):
+            apt_mult *= 0.7
+        # 晩成型: 後半の特別特訓は花開く
+        if apt["id"] == "latebloomer" and month > 6 and menu_id == 7:
+            apt_mult *= 1.4
+
     for key, delta in menu["effects"].items():
         if key == "fatigue":
             f = max(0, min(100, f + delta))
         else:
-            effective        = delta * growth_rate * peak_bonus
+            effective        = delta * growth_rate * peak_bonus * apt_mult
             fatigue_penalty  = 1.0 - (f / 200)
             effective       *= fatigue_penalty
             s[key]           = int(min(STAT_MAX, s.get(key, 0) + effective))
 
-    # ── ランダムイベント判定 ──
+    # ── ランダムイベント判定（素質で確率補正） ──
     event_result = None
+    apt_injury_mult = 1.0
+    apt_bloom_mult  = 1.0
+    if seed is not None:
+        apt = get_aptitude_type(seed)
+        apt_injury_mult = apt["injury_mult"]
+        apt_bloom_mult  = apt["bloom_mult"]
+
     for ev in EVENTS:
         if f < ev["fatigue_threshold"] and ev["id"] == "injury":
+            continue
+        # extra_trial は min_month 以降のみ発動
+        if ev["id"] == "extra_trial" and month < ev.get("min_month", 7):
+            continue
+        # extra_trial は試走済みの場合のみ有効（試走未経験馬には出ない）
+        if ev["id"] == "extra_trial" and not s.get("_trial_result"):
             continue
         prob = ev["prob"]
         if ev["id"] == "injury" and f >= 60:
             prob *= 2.0
+        if ev["id"] == "injury":
+            prob *= apt_injury_mult
+        if ev["id"] == "breakthrough":
+            prob *= apt_bloom_mult
         if rng.random() < prob:
             new_s, sub_msg = ev["effect"](s, rng)
             s = new_s
@@ -372,6 +562,22 @@ def apply_training(stats, fatigue, menu_id, month, growth_rate, peak_month):
             }
             break
 
+    # ── extra_trial: 通常イベントとは独立した別判定 ──
+    # seed引数がある場合のみ有効（seedがないとゲーム状態を再現できない）
+    if event_result is None and month >= 7 and s.get("_trial_result") and seed is not None:
+        _et_seed = int(seed) ^ (month * 0xF1A9) ^ (menu_id * 0x2B3C)
+        _et_rng  = random.Random(_et_seed)
+        if _et_rng.random() < 0.07:   # 月ごと約7%
+            new_s, sub_msg = _apply_extra_trial(s, _et_rng)
+            s = new_s
+            et_ev = next((e for e in EVENTS if e["id"] == "extra_trial"), None)
+            if et_ev:
+                event_result = {
+                    "message_prefix": et_ev["message_prefix"],
+                    "message":        _et_rng.choice(et_ev["messages"]),
+                    "sub":            sub_msg,
+                }
+
     # 育成ルート記録
     hc = s.get("_history_count", {})
     hc[menu_id] = hc.get(menu_id, 0) + 1
@@ -382,6 +588,133 @@ def apply_training(stats, fatigue, menu_id, month, growth_rate, peak_month):
 
     return s, f, event_result
 
+
+
+# ── 試走レース ────────────────────────────────────────
+TRIAL_OUTCOMES = ["victory", "mid", "defeat"]
+TRIAL_OUTCOME_MESSAGES = {
+    "victory": {
+        "prefix":  "【試走：勝利！】",
+        "messages": [
+            "試走で見事な走りを見せた！本番でも期待できるぞ！",
+            "ライバルを圧倒した！この経験が自信になる！",
+            "完勝だ。この馬の底力を見た気がする。",
+        ],
+        "sub": "精神力と経験値に大幅ボーナス。",
+    },
+    "mid": {
+        "prefix":  "【試走：中位】",
+        "messages": [
+            "可もなく不可もなし。課題は見えたが収穫もあった。",
+            "まずまずの走り。次につながる経験になったな。",
+            "真ん中あたりでフィニッシュ。経験として積んだぞ。",
+        ],
+        "sub": "小さな経験ボーナス。",
+    },
+    "defeat": {
+        "prefix":  "【試走：惨敗…】",
+        "messages": [
+            "完全に負けてしまった。だが、この悔しさが糧になる。",
+            "ライバルに大きく離された。現実を知るのも大事だ。",
+            "惨敗だが、弱点が明確になった。次につなげよう。",
+        ],
+        "sub": "精神力が少し下がるが、次月の成長率にリベンジ補正。",
+    },
+}
+
+def calc_trial_outcome(stats, month, seed):
+    """
+    試走レースの結果を計算。
+    育成中ステータスの合計値 vs ランダム敵強さで勝敗判定。
+    """
+    rng = random.Random(seed ^ month * 0xABCD)
+    total = sum(stats.get(k, 0) for k in ["speed","stamina","corner","mental","adaptability"])
+    # 目標難易度（月7=初回試走基準）:
+    #   普通の馬(total≈260): 勝30%  良い馬(290): 勝43%  最良(330): 勝62%
+    # 月が上がるほど敵が強くなり、特別招待レースは厳しくなる
+    enemy_base = 150 + month * 20   # 7月=290, 9月=330, 11月=370
+    enemy = rng.randint(int(enemy_base * 0.65), int(enemy_base * 1.35))
+    if total >= enemy * 1.05:
+        return "victory"
+    elif total >= enemy * 0.78:
+        return "mid"
+    else:
+        return "defeat"
+
+def apply_trial_race(stats, fatigue, month, seed, my_name="我が馬"):
+    """
+    試走レースを1回実行し (new_stats, new_fatigue, event_result) を返す。
+    menu_id=8 として history に記録される想定。
+    """
+    from horserace import make_horse_name
+    s = dict(stats)
+    f = fatigue
+    outcome = calc_trial_outcome(s, month, seed if seed else 0)
+    odata   = TRIAL_OUTCOME_MESSAGES[outcome]
+    rng     = random.Random((seed or 0) ^ month * 0x5678)
+
+    if outcome == "victory":
+        s["mental"]      = min(STAT_MAX, s.get("mental", 0) + rng.randint(6, 12))
+        s["speed"]       = min(STAT_MAX, s.get("speed",  0) + rng.randint(3,  7))
+        s["stamina"]     = min(STAT_MAX, s.get("stamina",0) + rng.randint(3,  7))
+        f = min(100, f + 20)
+    elif outcome == "mid":
+        s["mental"]      = min(STAT_MAX, s.get("mental", 0) + rng.randint(2,  5))
+        f = min(100, f + 15)
+    else:  # defeat
+        s["mental"]      = max(0, s.get("mental", 0) - rng.randint(3, 8))
+        f = min(100, f + 10)
+        s["_revenge"]    = s.get("_revenge", 0) + 1
+
+    # ── 対戦馬3頭の名前を生成して順位リストを作る ──
+    rival_names = [make_horse_name() for _ in range(3)]
+    # 自馬の順位：victory=1位, mid=2or3位ランダム, defeat=3or4位
+    if outcome == "victory":
+        my_rank = 1
+        ranking = [my_name] + rng.sample(rival_names, 3)
+    elif outcome == "mid":
+        my_rank = rng.choice([2, 3])
+        others  = list(rival_names)
+        ranking = []
+        inserted = False
+        for i in range(1, 5):
+            if i == my_rank:
+                ranking.append(my_name)
+                inserted = True
+            else:
+                if others:
+                    ranking.append(others.pop(0))
+        if not inserted:
+            ranking.append(my_name)
+    else:  # defeat
+        my_rank = rng.choice([3, 4])
+        others  = list(rival_names)
+        ranking = []
+        inserted = False
+        for i in range(1, 5):
+            if i == my_rank:
+                ranking.append(my_name)
+                inserted = True
+            else:
+                if others:
+                    ranking.append(others.pop(0))
+        if not inserted:
+            ranking.append(my_name)
+
+    # 試走回数記録
+    s["_trial_count"]  = s.get("_trial_count", 0) + 1
+    s["_trial_result"] = s.get("_trial_result", []) + [outcome]
+
+    msg = rng.choice(odata["messages"])
+    event_result = {
+        "message_prefix": odata["prefix"],
+        "message":        msg,
+        "sub":            odata["sub"],
+        "outcome":        outcome,
+        "ranking":        ranking,   # ["1着名","2着名","3着名","4着名"]
+        "my_rank":        my_rank,
+    }
+    return s, f, event_result
 
 # ── 通常コーチメッセージ取得 ──────────────────────────
 def get_coach_message(menu_id, rng=None):
@@ -400,7 +733,7 @@ def replay_training(seed, history):
     peak_month  = stats["peak_month"]
     for month, menu_id in enumerate(history):
         stats, fatigue, _ = apply_training(
-            stats, fatigue, menu_id, month + 1, growth_rate, peak_month)
+            stats, fatigue, menu_id, month + 1, growth_rate, peak_month, seed=seed)
     traits          = [t["name"] for t in TRAITS if t["condition"](stats)]
     stats["traits"] = traits
     stats["fatigue"]= fatigue
@@ -470,6 +803,14 @@ def calc_condition_bonus(stats, history, final_fatigue):
     # 全盛期が後期なら調子が乗りやすい
     if stats.get("peak_month", 6) >= 10:
         score += 1
+
+    # 試走の成績が調子に影響
+    trial_results = stats.get("_trial_result", [])
+    victories = trial_results.count("victory")
+    defeats   = trial_results.count("defeat")
+    score += victories       # 勝つたびに+1
+    score -= defeats         # 負けるたびに-1（ただしリベンジ精神があるので-0.5扱い）
+    score += stats.get("_revenge", 0) * 0  # リベンジ補正は成長率側で消化済み
 
     return max(-2, min(2, score))
 
