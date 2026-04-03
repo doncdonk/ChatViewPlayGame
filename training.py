@@ -442,6 +442,101 @@ def get_completion_message(stats):
         )
 
 
+
+# ══════════════════════════════════════════════
+#  カテゴリ型ランダム馬名生成
+# ══════════════════════════════════════════════
+_NAME_CATEGORIES = [
+    {
+        "id":      "myth",
+        "label":   "神話・英雄",
+        "weight":  15,
+        "prefix":  ["オーディン","アレス","ゼウス","トール","アヌビス","ヘルメス","ペガサス","アキレス"],
+        "suffix":  ["ブレイド","バスター","レジェンド","グローリー","エタニティ","ヴァリアント","ヒーロー","マイト"],
+    },
+    {
+        "id":      "nature",
+        "label":   "自然・天候",
+        "weight":  20,
+        "prefix":  ["ストーム","サンダー","ブリザ","トルネド","ボルケノ","ティダル","オーロラ","グレイル"],
+        "suffix":  ["フレア","ゲイル","スコール","ライジング","ブレスト","ウェイブ","テンペスト","サージ"],
+    },
+    {
+        "id":      "japanese",
+        "label":   "和風・地名",
+        "weight":  20,
+        "prefix":  ["ヤマト","フジ","サクラ","カスミ","アサヒ","ミナト","イブキ","ハクリュウ"],
+        "suffix":  ["イカズチ","カムイ","ミライ","ノゾミ","カゲロウ","ムサシ","アラシ","ヒカリ"],
+    },
+    {
+        "id":      "speed",
+        "label":   "疾走・光",
+        "weight":  20,
+        "prefix":  ["フラッシュ","ライト","ブレイズ","ソニック","レーザー","スパーク","ラピッド","ネオン"],
+        "suffix":  ["ダッシュ","アロー","エクスプレス","ストリーク","ランナー","バレット","ジェット","ボルト"],
+    },
+    {
+        "id":      "gem",
+        "label":   "宝石・輝き",
+        "weight":  15,
+        "prefix":  ["ダイヤ","ルビー","エメラル","サファイア","トパーズ","ジェイド","オパール","アメジスト"],
+        "suffix":  ["スター","クラウン","グロウ","シャイン","ルクス","クリスタル","ジュエル","プリズム"],
+    },
+    {
+        "id":      "wild",
+        "label":   "野性・猛獣",
+        "weight":  10,
+        "prefix":  ["イーグル","タイガー","ファルコン","レオパード","パンサー","グリフィン","バイソン","コンドル"],
+        "suffix":  ["クロウ","ファング","プライド","ハウル","タロン","ストライク","フューリー","レイジ"],
+    },
+]
+
+# カテゴリ重みリスト（キャッシュ）
+_CAT_IDS     = [c["id"]     for c in _NAME_CATEGORIES]
+_CAT_WEIGHTS = [c["weight"] for c in _NAME_CATEGORIES]
+
+def _truncate4(s):
+    """カタカナ文字列を4文字以内に切り詰める"""
+    return s[:4]
+
+def generate_random_horse_name(seed=None, exclude_names=None, prev_category=None):
+    """
+    カテゴリ型ランダム馬名を1つ生成して返す。
+    戻り値: (name: str, category_label: str)
+
+    seed        : None のとき時刻ベースで毎回変わる
+    exclude_names  : 除外する名前のセット（重複防止）
+    prev_category  : 直前のカテゴリID（連続同カテゴリを避ける）
+    """
+    import random as _r, time
+    if seed is None:
+        rng = _r.Random(int(time.time() * 1000) ^ _r.randint(0, 0xFFFF))
+    else:
+        rng = _r.Random(seed)
+
+    exclude_names = exclude_names or set()
+
+    for _attempt in range(30):
+        # カテゴリ選択（直前と同じカテゴリは重みを1/4に下げる）
+        weights = list(_CAT_WEIGHTS)
+        if prev_category:
+            for i, cid in enumerate(_CAT_IDS):
+                if cid == prev_category:
+                    weights[i] = max(1, weights[i] // 4)
+        cat = rng.choices(_NAME_CATEGORIES, weights=weights)[0]
+
+        prefix = _truncate4(rng.choice(cat["prefix"]))
+        suffix = _truncate4(rng.choice(cat["suffix"]))
+        name   = prefix + suffix
+        if len(name) > 8:
+            name = name[:8]
+
+        if name not in exclude_names:
+            return name, cat["label"]
+
+    # フォールバック（30回失敗は実質ありえないが念のため）
+    return "ミライボルト", "疾走・光"
+
 # ── seed・初期値生成 ──────────────────────────────────
 def generate_birth_seed():
     now = datetime.datetime.now()

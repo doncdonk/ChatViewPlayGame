@@ -568,6 +568,219 @@ class IconHorseRenderer(HorseRenderer):
     def clear(self, canvas):
         canvas.delete(self.tag)
 
+# ══════════════════════════════════════════════
+#  文字実況生成
+# ══════════════════════════════════════════════
+
+# ── フェーズ別テンプレート ──────────────────────
+_C_GATE_WAIT = [
+    "各馬ゲートに収まった。さあスタートを待つ！",
+    "今日のレースはいよいよ始まる！",
+    "好スタートを切れるか、注目の一戦だ！",
+]
+_C_GATE_OPEN = [
+    "ゲートオープン！{lead}が飛び出した！",
+    "スタート！{lead}がいい出だし！",
+    "一斉にスタート！{lead}が先頭に立つ！",
+    "ゲート解放！{lead}がいきなり前へ！",
+]
+_C_GATE_SLOW = [
+    "{slow}がやや出遅れた！挽回なるか！",
+    "{slow}、スタートで後手を踏んだ！",
+]
+
+_C_EARLY = [   # pos 0〜0.30
+    "{lead}が先頭、{second}が続く！",
+    "前半は{lead}がリード、まだまだ序盤だ！",
+    "{lead}が飛ばす！ペースはどうか！",
+    "序盤から{lead}が積極的に前を主張！",
+    "{second}が{lead}を追う展開！",
+]
+_C_MID = [     # pos 0.30〜0.60
+    "中間点！{lead}が先頭、{second}と{gap}差！",
+    "{lead}、まだ脚がある！",
+    "ここで{rising}が上がってきた！",
+    "{lead}が粘る！{second}が迫る！",
+    "レースは折り返し！{lead}がリード！",
+    "{lead}と{second}、並んで直線を目指す！",
+]
+_C_LATE = [    # pos 0.60〜0.90
+    "直線に入った！{lead}が抜け出す！",
+    "{lead}、脚色が違う！これは決まりか！",
+    "{second}が猛追！{lead}に並びかける！",
+    "残り僅か！{lead}か！{second}か！",
+    "{lead}が先頭！ゴールまであとわずか！",
+    "{rising}がごぼう抜き！一体何位まで上がるか！",
+]
+_C_FINAL = [   # pos 0.90〜
+    "ゴール前！{lead}が先頭で突っ込む！",
+    "{lead}、粘れ！{second}が迫ってきた！",
+    "あとわずか！{lead}か！{second}か！",
+    "最後の直線！{lead}が力を振り絞る！",
+]
+_C_GOAL = [
+    "{winner}がゴールイン！見事な走りだ！",
+    "{winner}が先着！{winner}の勝利！",
+    "1着は{winner}！強い走りを見せた！",
+    "{winner}、ゴール！この馬が一番強かった！",
+]
+_C_UPSET = [
+    "これは波乱！{winner}がまさかの先頭！",
+    "大穴{winner}が先頭でゴール！信じられない！",
+    "{winner}、大逆転！誰が予想しただろうか！",
+]
+_C_FAVORITE = [
+    "本命{winner}が貫録の勝利！",
+    "{winner}、さすがの強さだ！順当な結果！",
+    "人気通り！{winner}がきっちり仕事をした！",
+]
+_C_TRAINED = [
+    "育てた{winner}が勝利！この喜びはひとしおだ！",
+    "{winner}、育成の成果を見せた！",
+    "我が馬{winner}が先頭でゴール！素晴らしい！",
+]
+_C_TIRED = [
+    "{horse}、脚が上がってきた！苦しい！",
+    "{horse}が失速！後続に交わされる！",
+]
+_C_COND_GOOD = [
+    "絶好調の{horse}、まだ余裕の走りだ！",
+    "{horse}、今日は状態がいい！",
+]
+_C_TRAIT = {
+    "快速型":    ["{horse}の快速が炸裂する！"],
+    "鉄人":      ["{horse}、スタミナが切れない！"],
+    "芝の帝王":  ["{horse}、芝で本領発揮か！"],
+    "孤高の怪物":["{horse}、圧倒的な強さを見せる！"],
+    "末脚怪物":  ["{horse}、末脚が炸裂！後ろから来る！"],
+}
+
+def _horse_name(h):
+    return h["name"]
+
+def make_commentary(horses, positions, surface, distance,
+                    phase, phase_t, prev_rank, odds,
+                    rng_seed=0):
+    """
+    現在のレース状況から実況テキストを1本生成して返す。
+    返り値: str  （生成できない場合は None）
+
+    horses    : レース馬リスト
+    positions : horse_pos リスト（0.0〜1.0）
+    phase     : "gate" / "race" / "goal"
+    phase_t   : フェーズ内経過秒
+    prev_rank : 前回の順位リスト（horse index順）、初回は None
+    odds      : {horse_number: float}
+    rng_seed  : ランダム選択用シード
+    """
+    import random as _r
+    rng = _r.Random(rng_seed)
+
+    n = len(horses)
+    if n == 0:
+        return None
+
+    # ── gate フェーズ ──
+    if phase == "gate":
+        if phase_t < 1.5:
+            return rng.choice(_C_GATE_WAIT)
+        # ゲートオープン直後: 先頭に立ちそうな馬（速度が高い）
+        fast = max(horses, key=lambda h: h.get("speed", 1))
+        slow_candidates = sorted(horses, key=lambda h: h.get("speed",1))[:2]
+        slow = rng.choice(slow_candidates)
+        if rng.random() < 0.5:
+            return rng.choice(_C_GATE_OPEN).format(lead=_horse_name(fast))
+        else:
+            return rng.choice(_C_GATE_SLOW).format(slow=_horse_name(slow))
+
+    # ── race フェーズ ──
+    if phase == "race" and positions:
+        # 現在の順位（positionで降順ソート）
+        order = sorted(range(n), key=lambda i: -positions[i])
+        lead_h   = horses[order[0]]
+        second_h = horses[order[1]] if n > 1 else lead_h
+        lead_pos = positions[order[0]]
+
+        # ギャップ
+        gap_raw = positions[order[0]] - positions[order[1]] if n > 1 else 0
+        if gap_raw < 0.05:
+            gap_str = "ハナ差"
+        elif gap_raw < 0.10:
+            gap_str = "半馬身"
+        elif gap_raw < 0.20:
+            gap_str = "1馬身"
+        else:
+            gap_str = "大きな差"
+
+        # 順位変動馬（前回と比べて上昇した馬）
+        rising_h = None
+        if prev_rank:
+            for new_pos_idx, horse_idx in enumerate(order):
+                old_pos_idx = prev_rank.index(horse_idx) if horse_idx in prev_rank else new_pos_idx
+                if new_pos_idx < old_pos_idx - 1:
+                    rising_h = horses[horse_idx]
+                    break
+
+        fmt = dict(
+            lead   = _horse_name(lead_h),
+            second = _horse_name(second_h),
+            gap    = gap_str,
+            rising = _horse_name(rising_h) if rising_h else _horse_name(second_h),
+        )
+
+        # 疲労/好調チェック（育成馬）
+        if rng.random() < 0.15:
+            for h in horses:
+                if h.get("condition") == "◎":
+                    return rng.choice(_C_COND_GOOD).format(horse=_horse_name(h))
+            for h in horses:
+                if h.get("condition") == "×" and positions[horses.index(h)] < 0.5:
+                    return rng.choice(_C_TIRED).format(horse=_horse_name(h))
+
+        # 特性コメント（育成馬のみ、低確率）
+        if rng.random() < 0.12:
+            for h in horses:
+                traits = h.get("traits", [])
+                for trait_name, msgs in _C_TRAIT.items():
+                    if trait_name in traits:
+                        return rng.choice(msgs).format(horse=_horse_name(h))
+
+        # 位置によってテンプレートを選ぶ
+        if lead_pos < 0.30:
+            tmpl = rng.choice(_C_EARLY)
+        elif lead_pos < 0.60:
+            tmpl = rng.choice(_C_MID)
+        elif lead_pos < 0.90:
+            # 直線: 順位変動があれば rising 優先
+            if rising_h and rng.random() < 0.4:
+                tmpl = "{rising}がごぼう抜き！一体何位まで上がるか！"
+            else:
+                tmpl = rng.choice(_C_LATE)
+        else:
+            tmpl = rng.choice(_C_FINAL)
+
+        return tmpl.format(**fmt)
+
+    # ── goal フェーズ ──
+    if phase == "goal":
+        if not horses:
+            return None
+        winner = horses[0]  # 呼び出し側で1着を渡す想定
+        winner_odds = odds.get(winner["number"], 5.0)
+        is_trained  = winner.get("is_trained", False)
+
+        if is_trained:
+            return rng.choice(_C_TRAINED).format(winner=_horse_name(winner))
+        elif winner_odds <= 3.0:
+            return rng.choice(_C_FAVORITE).format(winner=_horse_name(winner))
+        elif winner_odds >= 10.0:
+            return rng.choice(_C_UPSET).format(winner=_horse_name(winner))
+        else:
+            return rng.choice(_C_GOAL).format(winner=_horse_name(winner))
+
+    return None
+
+
 
 class ImageHorseRenderer(HorseRenderer):
     """画像スプライトを使った描画"""

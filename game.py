@@ -25,7 +25,8 @@ from twitch_client import TwitchClient
 from reversi import Reversi, BLACK, WHITE, EMPTY
 from horserace import (generate_race, run_race, IconHorseRenderer,
                         ImageHorseRenderer, calc_odds,
-                        load_horse_sprites, load_gate_image)
+                        load_horse_sprites, load_gate_image,
+                        make_commentary)
 
 # ══════════════════════════════════════════════
 #  定数
@@ -263,6 +264,101 @@ def make_label(parent, text, fg=None, font=None, **kw):
                     bg=BG, fg=fg or TEXT_W,
                     font=font or ("Courier", 12),
                     **kw)
+
+def _load_panel_img(img_dir, size=(48,48)):
+    """ui_panel_border.png を RGBA PhotoImage として返す（キャッシュ付き）"""
+    import os
+    if not hasattr(_load_panel_img, "_cache"):
+        _load_panel_img._cache = {}
+    key = (img_dir, size)
+    if key in _load_panel_img._cache:
+        return _load_panel_img._cache[key]
+    try:
+        from PIL import Image, ImageTk
+        path = os.path.join(img_dir, "ui_panel_border.png")
+        if os.path.exists(path):
+            img = Image.open(path).convert("RGBA")
+            if img.size != size:
+                img = img.resize(size, Image.NEAREST)
+            pimg = ImageTk.PhotoImage(img)
+            _load_panel_img._cache[key] = pimg
+            return pimg
+    except Exception:
+        pass
+    _load_panel_img._cache[key] = None
+    return None
+
+def make_panel_frame(parent, width, height, img_dir=None, border=16):
+    """
+    9スライスUI枠付きのFrameを返す。
+    create_window を使わず Label(image)+Frame 重ね方式で白線を完全排除。
+    戻り値: (outer_frame, inner_frame)
+      outer_frame を pack/grid してください。
+      inner_frame にウィジェットを追加してください。
+    """
+    import os
+
+    # 外側コンテナ（bg=BG で枠画像の透明部分と同化）
+    outer = tk.Frame(parent, width=width, height=height,
+                     bg=BG, bd=0, highlightthickness=0)
+    outer.pack_propagate(False)  # サイズ固定
+
+    # 9スライス合成済み画像を背景Labelとして敷く
+    if img_dir is None:
+        img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+
+    _pimg = None
+    try:
+        from PIL import Image, ImageTk
+        path = os.path.join(img_dir, "ui_panel_border.png")
+        if os.path.exists(path):
+            # キャッシュ: モジュールレベルのdictに保存
+            _cache = _panel_image_cache
+            key = (width, height, border)
+            if key not in _cache:
+                src = Image.open(path).convert("RGBA")
+                sw, sh = src.size
+                b = border
+                W, H = width, height
+                out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                def _p(crop, x, y): out.paste(crop, (x, y), crop)
+                mw, mh = W-b*2, H-b*2
+                _p(src.crop((0,   0,   b,  b)),   0,   0)
+                _p(src.crop((sw-b,0,   sw, b)),   W-b, 0)
+                _p(src.crop((0,   sh-b,b,  sh)),  0,   H-b)
+                _p(src.crop((sw-b,sh-b,sw, sh)),  W-b, H-b)
+                _p(src.crop((b,0,sw-b,b)).resize((mw,b),Image.NEAREST),      b, 0)
+                _p(src.crop((b,sh-b,sw-b,sh)).resize((mw,b),Image.NEAREST),  b, H-b)
+                _p(src.crop((0,b,b,sh-b)).resize((b,mh),Image.NEAREST),      0, b)
+                _p(src.crop((sw-b,b,sw,sh-b)).resize((b,mh),Image.NEAREST),  W-b, b)
+                _p(src.crop((b,b,sw-b,sh-b)).resize((mw,mh),Image.NEAREST),  b, b)
+                _cache[key] = ImageTk.PhotoImage(out)
+            _pimg = _cache[key]
+    except Exception:
+        pass
+
+    if _pimg is not None:
+        # 背景画像ラベル（place で全面に敷く）
+        bg_lbl = tk.Label(outer, image=_pimg, bg=BG,
+                          bd=0, highlightthickness=0)
+        bg_lbl.image = _pimg   # GC防止
+        bg_lbl.place(x=0, y=0, width=width, height=height)
+    else:
+        # フォールバック: 矩形枠をCanvasで描く
+        fb = tk.Canvas(outer, width=width, height=height,
+                       bg=SIDEBAR_BG, highlightthickness=0, bd=0)
+        fb.create_rectangle(0, 0, width-1, height-1,
+                            outline=CELL_BORDER, width=1)
+        fb.place(x=0, y=0)
+
+    # 内側Frame（place で枠border分だけ内側に配置）
+    inner = tk.Frame(outer, bg=BG, bd=0, highlightthickness=0)
+    inner.place(x=border, y=border,
+                width=width - border*2, height=height - border*2)
+    return outer, inner
+
+# 9スライス画像キャッシュ（関数をまたいで共有）
+_panel_image_cache = {}
 
 def make_btn(parent, text, cmd, bg=None, fg=None, **kw):
     return tk.Button(parent, text=text, command=cmd,
@@ -2269,6 +2365,15 @@ class HorseRaceScreen:
         self.current_race   = 1
         # 累積成績: {username: {"votes": N, "hits": N, "points": float}}
         self.cumulative     = {}
+        # 実況システム
+        self._commentary      = ""
+        self._commentary_t    = 0.0
+        self._commentary_dur  = 3.5
+        self._commentary_seed = 0
+        self._prev_rank       = None
+        self._commentary_pos_triggers = set()
+        self._goal_triggered  = False
+        self._goal_particles  = []
         self._loop()
 
     # ── ループ ───────────────────────────────
@@ -2379,6 +2484,7 @@ class HorseRaceScreen:
                 self._end_vote()
 
         elif self.phase == "gate":
+            self._update_commentary_gate(dt)
             if self.phase_t >= 4.0:
                 self._start_race()
 
@@ -2402,6 +2508,9 @@ class HorseRaceScreen:
                 base_speed = (0.0015 + res["norm"] * 0.0008) * dist_factor
                 rand_spd   = random.uniform(0.9, 1.1)
                 self.horse_pos[idx] = min(1.0, self.horse_pos[idx] + base_speed * rand_spd)
+
+            # 実況更新
+            self._update_commentary(dt)
 
             # 先頭馬がゴールしたらすぐ演出開始（1度だけ）
             if self.horse_pos and max(self.horse_pos) >= 1.0 and not self._goal_triggered:
@@ -2439,6 +2548,67 @@ class HorseRaceScreen:
         self._goal_triggered = False
         self.results         = run_race(self.horses, self.race["surface"], self.race["distance"])
         self.horse_pos       = [0.0] * len(self.horses)
+        # 実況リセット
+        self._commentary     = ""
+        self._commentary_t   = 0.0
+        self._commentary_seed = 0
+        self._prev_rank      = None
+        self._commentary_pos_triggers = set()
+
+    def _update_commentary_gate(self, dt):
+        """gate フェーズの実況更新"""
+        self._commentary_t += dt
+        # 1.5秒ごとに更新
+        if self._commentary_t < 1.5 and self._commentary:
+            return
+        self._commentary_seed += 1
+        txt = make_commentary(
+            self.horses, [], self.race["surface"], self.race["distance"],
+            "gate", self.phase_t, None, self.odds,
+            rng_seed=self._commentary_seed)
+        if txt:
+            self._commentary   = txt
+            self._commentary_t = 0.0
+
+    def _update_commentary(self, dt):
+        """race フェーズの実況更新"""
+        if not self.horse_pos:
+            return
+
+        n = len(self.horses)
+        order = sorted(range(n), key=lambda i: -self.horse_pos[i])
+        lead_pos = self.horse_pos[order[0]]
+
+        # pos 閾値トリガー（各閾値通過時に即発話）
+        for thresh in [0.05, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 0.95]:
+            if lead_pos >= thresh and thresh not in self._commentary_pos_triggers:
+                self._commentary_pos_triggers.add(thresh)
+                self._commentary_seed += 1
+                txt = make_commentary(
+                    self.horses, self.horse_pos,
+                    self.race["surface"], self.race["distance"],
+                    "race", self.phase_t, self._prev_rank, self.odds,
+                    rng_seed=self._commentary_seed)
+                if txt:
+                    self._commentary   = txt
+                    self._commentary_t = 0.0
+                break   # 1フレーム1メッセージ
+
+        # タイマー更新（最低5秒に1回）
+        self._commentary_t += dt
+        if self._commentary_t >= self._commentary_dur:
+            self._commentary_seed += 1
+            txt = make_commentary(
+                self.horses, self.horse_pos,
+                self.race["surface"], self.race["distance"],
+                "race", self.phase_t, self._prev_rank, self.odds,
+                rng_seed=self._commentary_seed + int(self.phase_t * 10))
+            if txt:
+                self._commentary   = txt
+                self._commentary_t = 0.0
+
+        # 前回順位を更新
+        self._prev_rank = order
 
     def _start_goal(self):
         self.phase        = "goal"
@@ -2462,6 +2632,20 @@ class HorseRaceScreen:
                         "r":     _r.randint(3, 7),
                         "alive": True,
                     })
+        # ゴール実況
+        if self.results:
+            winner_h = next((r["horse"] for r in self.results if r["rank"]==1), None)
+            if winner_h:
+                self._commentary_seed += 100
+                txt = make_commentary(
+                    [winner_h], [], self.race["surface"], self.race["distance"],
+                    "goal", 0.0, None, self.odds,
+                    rng_seed=self._commentary_seed)
+                if txt:
+                    self._commentary   = txt
+                    self._commentary_t = 0.0
+                    self._commentary_dur = 5.0   # ゴールは長め表示
+
         # ゴール背景画像ロード（未ロード時）
         if not hasattr(self, "_goal_bg_img"):
             self._load_goal_bg()
@@ -3020,6 +3204,16 @@ class HorseRaceScreen:
                     frame=self.anim_frame if opened else 0,
                     scale=0.7)
 
+        # ── 実況テキスト（gate）──
+        if self._commentary:
+            com_y = self.win_h - 54
+            c.create_rectangle(0, com_y - 14, self.win_w, com_y + 16,
+                fill="#050A14", outline="", tags=tag)
+            c.create_text(self.win_w // 2, com_y,
+                text=f"📢  {self._commentary}",
+                fill=FLAG_COL, font=("Courier", 12, "bold"),
+                anchor="center", tags=tag)
+
         # phase_t >= 3.0 でレース開始（_update_phaseで制御）
 
     def _draw_race(self):
@@ -3087,6 +3281,16 @@ class HorseRaceScreen:
             else:
                 self.renderers[i].draw(c, hx, ry+lane_h//2+sway, col,
                                        frame=self.anim_frame, scale=0.65)
+
+        # ── 実況テキスト ──
+        if self._commentary:
+            com_y = self.win_h - 54
+            c.create_rectangle(0, com_y - 14, self.win_w, com_y + 16,
+                fill="#050A14", outline="", tags=tag)
+            c.create_text(self.win_w // 2, com_y,
+                text=f"📢  {self._commentary}",
+                fill=FLAG_COL, font=("Courier", 12, "bold"),
+                anchor="center", tags=tag)
 
         # 距離表示
         surf_col2 = "#50E080" if surface == "芝" else "#C8A050"
@@ -3232,6 +3436,19 @@ class HorseRaceScreen:
                 r = p["r"]
                 c.create_oval(p["x"]-r, p["y"]-r, p["x"]+r, p["y"]+r,
                     fill=p["color"], outline="", tags=tag)
+
+        # ゴール実況テキスト
+        if self._commentary:
+            c.create_rectangle(
+                0, self.win_h - 70,
+                self.win_w, self.win_h - 38,
+                fill="#050A14", outline="", tags=tag)
+            c.create_text(
+                cx, self.win_h - 54,
+                text=f"📢  {self._commentary}",
+                fill=FLAG_COL,
+                font=("Courier", 13, "bold"),
+                anchor="center", tags=tag)
 
     def _draw_result(self):
         c = self.canvas
@@ -3509,6 +3726,13 @@ class HorseRaceScreen:
         self._goal_particles  = []
         self._goal_triggered  = False
         self._modal_horse     = None
+        # 実況システム
+        self._commentary      = ""       # 現在表示中のテキスト
+        self._commentary_t    = 0.0      # 表示経過秒
+        self._commentary_dur  = 3.5      # 1メッセージの表示秒数
+        self._commentary_seed = 0        # ランダム選択シード
+        self._prev_rank       = None     # 前フレームの順位（変動検出用）
+        self._commentary_pos_triggers = set()  # 通過済みpos閾値
         self._modal_close     = None
         self._detail_rects    = []
         # ゴール演出キャッシュをクリア（次レースの勝ち馬に備える）
@@ -3960,6 +4184,12 @@ class TrainingScreen:
     # ── 馬名入力 ──────────────────────────────
     def _build_name_screen(self):
         for w in self.root.winfo_children(): w.destroy()
+        # ランダム名生成の状態（セッション内重複防止）
+        if not hasattr(self, "_used_random_names"):
+            self._used_random_names = set()
+        if not hasattr(self, "_prev_name_category"):
+            self._prev_name_category = None
+
         make_label(self.root, "🐴 馬を育てる",
                    fg=ACCENT_COL, font=("Courier",20,"bold")).pack(pady=(28,4))
         make_label(self.root, "育てる馬の名前を入力してください（カタカナ・最大8文字）",
@@ -3967,17 +4197,42 @@ class TrainingScreen:
         frame = tk.Frame(self.root, bg=BG)
         frame.pack(padx=40)
         make_label(frame, "馬名:", font=("Courier",12,"bold"), anchor="w").pack(fill="x")
+        # 入力欄 + ランダムボタンを横並びに
+        entry_row = tk.Frame(frame, bg=BG)
+        entry_row.pack(fill="x", pady=(4,0))
         self._name_var = tk.StringVar()
-        tk.Entry(frame, textvariable=self._name_var, width=20,
+        tk.Entry(entry_row, textvariable=self._name_var, width=16,
                  bg=CELL_HID, fg=TEXT_W, insertbackground=TEXT_W,
-                 relief="flat", font=("Courier",16), bd=8).pack(fill="x", pady=(4,0))
+                 relief="flat", font=("Courier",16), bd=8).pack(side="left", fill="x", expand=True)
+
+        def do_random():
+            """ランダムボタン: 毎回違う名前をサクッと入力"""
+            tr = self._tr
+            name, cat_label_str = tr.generate_random_horse_name(
+                exclude_names=self._used_random_names,
+                prev_category=self._prev_name_category,
+            )
+            for c in tr._NAME_CATEGORIES:
+                if c["label"] == cat_label_str:
+                    self._prev_name_category = c["id"]
+                    break
+            self._name_var.set(name)
+            self._err_var.set("")
+            self._used_random_names.add(name)
+            if len(self._used_random_names) > 20:
+                self._used_random_names.pop()
+
+        make_btn(entry_row, "🎲", do_random,
+                 bg=BTN_DARK, fg=ACCENT_COL).pack(side="left", padx=(6,0))
+
         self._err_var = tk.StringVar()
         tk.Label(frame, textvariable=self._err_var,
                  bg=BG, fg=MINE_COL, font=("Courier",11)).pack(pady=(8,0))
         make_label(frame, f"誕生シード: {self.seed:08X}",
-                   fg=TEXT_G, font=("Courier",9)).pack(anchor="w", pady=(8,0))
+                   fg=TEXT_G, font=("Courier",9)).pack(anchor="w", pady=(4,0))
+
         bf = tk.Frame(frame, bg=BG)
-        bf.pack(fill="x", pady=(24,0))
+        bf.pack(fill="x", pady=(20,0))
         make_btn(bf, "◀  戻る", self.on_back).pack(side="left")
         make_btn(bf, "育成開始 ▶", self._start_training,
                  bg=SAFE_COL, fg=BG).pack(side="right")
@@ -4167,7 +4422,8 @@ class TrainingScreen:
     def _load_sprites(self):
         """育成演出用スプライトを読み込む（Pillow必須）"""
         import os
-        self._img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "img")
+        import os as _os
+        self._img_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "img")
         img_dir = self._img_dir
         try:
             from horserace import load_horse_sprites
@@ -4666,34 +4922,40 @@ class TrainingScreen:
         make_label(self.root, f"🐴 {self.name}  第{self.month}月 完了（試走）",
                    fg=ACCENT_COL, font=("Courier",13)).pack(pady=(0,16))
 
-        res_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
-        res_frame.pack(fill="x", padx=40, pady=(0,12))
-        make_label(res_frame, event["message_prefix"],
-                   fg=col, font=("Courier",12,"bold")).pack(anchor="w", padx=12, pady=(8,0))
-        make_label(res_frame, event["message"],
-                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20)
-        make_label(res_frame, event["sub"],
-                   fg=TEXT_G, font=("Courier",10)).pack(anchor="w", padx=20, pady=(0,8))
+        _res = self.cfg.get("resolution", DEFAULT_RES)
+        _pw, _ = RESOLUTIONS.get(_res, RESOLUTIONS[DEFAULT_RES])
+        _panel_w = _pw - 80
 
-        # ── 順位表示 ──
+        # 結果メッセージ枠
+        _rv, _ri = make_panel_frame(self.root, _panel_w, 85, img_dir=self._img_dir)
+        _rv.pack(padx=40, pady=(0,10))
+        make_label(_ri, event["message_prefix"],
+                   fg=col, font=("Courier",11,"bold")).pack(anchor="w")
+        make_label(_ri, event["message"],
+                   fg=TEXT_W, font=("Courier",10)).pack(anchor="w")
+        make_label(_ri, event["sub"],
+                   fg=TEXT_G, font=("Courier",9)).pack(anchor="w")
+
+        # 順位表示枠
         ranking = event.get("ranking", [])
         my_rank = event.get("my_rank", "-")
         if ranking:
-            rank_frame = tk.Frame(self.root, bg="#0A1A0A")
-            rank_frame.pack(fill="x", padx=40, pady=(0,10))
-            make_label(rank_frame, "── レース順位 ──",
-                       fg=TEXT_G, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(6,2))
+            _rk_h = 30 + len(ranking) * 22
+            _rk_cv, _rk_inner = make_panel_frame(
+                self.root, _panel_w, _rk_h, img_dir=self._img_dir)
+            _rk_cv.pack(padx=40, pady=(0,10))
+            make_label(_rk_inner, "── レース順位 ──",
+                       fg=TEXT_G, font=("Courier",10,"bold")).pack(anchor="w")
             medals = ["🥇","🥈","🥉","4"]
             for i, horse_nm in enumerate(ranking):
                 is_my = (horse_nm == self.name)
                 nm_col = col if is_my else TEXT_W
                 nm_bold = "bold" if is_my else "normal"
                 tag = " ◀ 我が馬" if is_my else ""
-                make_label(rank_frame,
-                           f"  {medals[i]}  {horse_nm}{tag}",
+                make_label(_rk_inner,
+                           f"{medals[i]}  {horse_nm}{tag}",
                            fg=nm_col, font=("Courier",11,nm_bold)
-                           ).pack(anchor="w", padx=16)
-            tk.Label(rank_frame, text="", bg="#0A1A0A").pack(pady=2)
+                           ).pack(anchor="w")
 
         # 試走実績
         results = self.stats.get("_trial_result", [])
@@ -4715,28 +4977,34 @@ class TrainingScreen:
     def _show_coach_message(self, menu, coach_msg, event):
         for w in self.root.winfo_children(): w.destroy()
         make_label(self.root, f"🐴 {self.name}  第{self.month}月 完了",
-                   fg=ACCENT_COL, font=("Courier",16,"bold")).pack(pady=(28,16))
+                   fg=ACCENT_COL, font=("Courier",16,"bold")).pack(pady=(28,12))
 
-        # 通常コーチメッセージ
-        msg_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
-        msg_frame.pack(fill="x", padx=40, pady=(0,12))
-        make_label(msg_frame, "調教師:",
-                   fg=FLAG_COL, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(8,0))
-        make_label(msg_frame, f"「{coach_msg}」",
-                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20, pady=(0,8))
+        # コーチメッセージ枠（UI パネル）
+        _res = self.cfg.get("resolution", DEFAULT_RES)
+        _pw, _ = RESOLUTIONS.get(_res, RESOLUTIONS[DEFAULT_RES])
+        _panel_w = _pw - 80
+        _coach_cv, _coach_inner = make_panel_frame(
+            self.root, _panel_w, 80, img_dir=self._img_dir)
+        _coach_cv.pack(padx=40, pady=(0,10))
+        make_label(_coach_inner, "調教師:",
+                   fg=FLAG_COL, font=("Courier",10,"bold")).pack(anchor="w")
+        make_label(_coach_inner, f"「{coach_msg}」",
+                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w")
 
-        # イベントメッセージ
+        # イベントメッセージ枠
         if event:
-            ev_frame = tk.Frame(self.root, bg="#1A0A00" if "アクシデント" in event["message_prefix"] else "#0A1A00")
-            ev_frame.pack(fill="x", padx=40, pady=(0,12))
-            make_label(ev_frame, event["message_prefix"],
-                       fg=MINE_COL if "アクシデント" in event["message_prefix"] else SAFE_COL,
-                       font=("Courier",12,"bold")).pack(anchor="w", padx=12, pady=(8,0))
-            make_label(ev_frame, event["message"],
-                       fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20)
+            is_bad = "アクシデント" in event["message_prefix"]
+            ev_col  = MINE_COL if is_bad else SAFE_COL
+            _ev_cv, _ev_inner = make_panel_frame(
+                self.root, _panel_w, 90, img_dir=self._img_dir)
+            _ev_cv.pack(padx=40, pady=(0,10))
+            make_label(_ev_inner, event["message_prefix"],
+                       fg=ev_col, font=("Courier",11,"bold")).pack(anchor="w")
+            make_label(_ev_inner, event["message"],
+                       fg=TEXT_W, font=("Courier",10)).pack(anchor="w")
             if event.get("sub"):
-                make_label(ev_frame, event["sub"],
-                           fg=FLAG_COL, font=("Courier",10)).pack(anchor="w", padx=20, pady=(0,8))
+                make_label(_ev_inner, event["sub"],
+                           fg=FLAG_COL, font=("Courier",9)).pack(anchor="w")
 
         bf = tk.Frame(self.root, bg=BG)
         bf.pack(pady=(16,0))
@@ -4783,30 +5051,36 @@ class TrainingScreen:
         make_label(self.root, f"🐴 {self.name}  特別試走",
                    fg=ACCENT_COL, font=("Courier",13)).pack(pady=(0,12))
 
-        res_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
-        res_frame.pack(fill="x", padx=40, pady=(0,10))
-        make_label(res_frame, event["message_prefix"],
-                   fg=col, font=("Courier",12,"bold")).pack(anchor="w", padx=12, pady=(8,0))
-        make_label(res_frame, event["message"],
-                   fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20, pady=(0,8))
+        _res = self.cfg.get("resolution", DEFAULT_RES)
+        _pw, _ = RESOLUTIONS.get(_res, RESOLUTIONS[DEFAULT_RES])
+        _panel_w = _pw - 80
 
-        # 順位表示
+        # 結果メッセージ枠
+        _rv, _ri = make_panel_frame(self.root, _panel_w, 75, img_dir=self._img_dir)
+        _rv.pack(padx=40, pady=(0,10))
+        make_label(_ri, event["message_prefix"],
+                   fg=col, font=("Courier",11,"bold")).pack(anchor="w")
+        make_label(_ri, event["message"],
+                   fg=TEXT_W, font=("Courier",10)).pack(anchor="w")
+
+        # 順位表示枠
         ranking = event.get("ranking", [])
         if ranking:
-            rank_frame = tk.Frame(self.root, bg="#0A1A0A")
-            rank_frame.pack(fill="x", padx=40, pady=(0,10))
-            make_label(rank_frame, "── レース順位 ──",
-                       fg=TEXT_G, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(6,2))
+            _rk_h = 30 + len(ranking) * 22
+            _rk_cv, _rk_inner = make_panel_frame(
+                self.root, _panel_w, _rk_h, img_dir=self._img_dir)
+            _rk_cv.pack(padx=40, pady=(0,10))
+            make_label(_rk_inner, "── レース順位 ──",
+                       fg=TEXT_G, font=("Courier",10,"bold")).pack(anchor="w")
             medals = ["🥇","🥈","🥉","4"]
             for i, horse_nm in enumerate(ranking):
                 is_my = (horse_nm == self.name)
                 nm_col = col if is_my else TEXT_W
                 nm_bold = "bold" if is_my else "normal"
                 tag = " ◀ 我が馬" if is_my else ""
-                make_label(rank_frame,
-                           f"  {medals[i]}  {horse_nm}{tag}",
-                           fg=nm_col, font=("Courier",11,nm_bold)).pack(anchor="w", padx=16)
-            tk.Label(rank_frame, text="", bg="#0A1A0A").pack(pady=2)
+                make_label(_rk_inner,
+                           f"{medals[i]}  {horse_nm}{tag}",
+                           fg=nm_col, font=("Courier",11,nm_bold)).pack(anchor="w")
 
         # 実績
         results = self.stats.get("_trial_result", [])
@@ -4848,15 +5122,20 @@ class TrainingScreen:
         make_label(self.root, f"素質: 【{apt['name']}】  {apt['desc']}",
                    fg=ACCENT_COL, font=("Courier",11)).pack(pady=(0,10))
 
-        # 調教師の評価
-        ev_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
-        ev_frame.pack(fill="x", padx=40, pady=(0,12))
-        make_label(ev_frame, "調教師の評価:",
-                   fg=FLAG_COL, font=("Courier",10,"bold")).pack(anchor="w", padx=12, pady=(8,0))
-        for line in eval_msg.splitlines():
-            make_label(ev_frame, f"  {line}",
-                       fg=TEXT_W, font=("Courier",11)).pack(anchor="w", padx=20)
-        tk.Label(ev_frame, text="", bg=SIDEBAR_BG).pack(pady=4)
+        # 調教師の評価枠（UI パネル）
+        _eval_lines = eval_msg.splitlines()
+        _eval_h = 28 + len(_eval_lines) * 22
+        _res = self.cfg.get("resolution", DEFAULT_RES)
+        _pw, _ = RESOLUTIONS.get(_res, RESOLUTIONS[DEFAULT_RES])
+        _panel_w = _pw - 80
+        _ev_cv, _ev_inner = make_panel_frame(
+            self.root, _panel_w, _eval_h, img_dir=self._img_dir)
+        _ev_cv.pack(padx=40, pady=(0,10))
+        make_label(_ev_inner, "調教師の評価:",
+                   fg=FLAG_COL, font=("Courier",10,"bold")).pack(anchor="w")
+        for line in _eval_lines:
+            make_label(_ev_inner, f"  {line}",
+                       fg=TEXT_W, font=("Courier",11)).pack(anchor="w")
 
         # 五角形グラフ（最終）
         graph_size = 200
